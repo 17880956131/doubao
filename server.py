@@ -291,7 +291,10 @@ def run_benchmark():
               "expression_accuracy": round(expr_acc, 3), "gesture_accuracy": round(gest_acc, 3),
               "quality_accuracy": round(quality_acc, 3) if quality_acc is not None else None,
               "score": round(score, 3), "previous": previous, "layers": layers.status()["layers"],
-              "board": "behavior", "relationship": relationship_score()}
+              "board": "behavior", "relationship": relationship_score(),
+              "context": {"fingerprint": code_fingerprint()[:12],
+                          "observation": observation_active(),
+                          "layers": layers.status()["layers"]}}
     with open(BENCHMARK_LOG, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(result, ensure_ascii=False) + "\n")
     return {"ok": True, **result}
@@ -2436,6 +2439,9 @@ def score_boards():
 
 def benchmark_trend():
     history = _bench_history()
+    clean = [run for run in history if (run.get("context") or {}).get("observation")]
+    if clean:
+        history = clean
     days = {}
     for run in history:
         day = time.strftime("%Y-%m-%d", time.localtime(run.get("ts") or 0))
@@ -2452,33 +2458,108 @@ def benchmark_trend():
     if len(daily) >= 2:
         trend = round(daily[-1]["avg"] - daily[0]["avg"], 3)
     return {"days": daily, "day_count": len(daily), "trend": trend,
-            "note": "跨天基准：只有跨天数据才有意义；一天内多次运行不算成长"}
+            "clean_runs": len(history),
+            "note": "跨天基准：优先只统计观察期内的运行；一天内多次运行不算成长"}
+
+
+def uncertainty_metrics():
+    """把"疑惑"拆成多样性与不确定性，避免把层多当变糊涂。"""
+    import numpy as np
+    rows = layers._rows()[-150:]
+    probs, y = layers.ensemble_matrix(rows)
+    if probs is None or len(probs) < 8:
+        return {"ok": False, "reason": "数据不足"}
+    entropy = -np.sum(probs * np.log(np.clip(probs, 1e-9, 1.0)), axis=1) / np.log(len(EXPRESSIONS))
+    top1 = probs.max(axis=1)
+    accuracy = float((probs.argmax(axis=1) == y).mean())
+    ece, _nll = layers.calibration_error(probs, y)
+    diversity = 0.0
+    try:
+        X, _y, _g, _w = layers._features(rows)
+        ordered = sorted(layers.models.items(), key=lambda item: int(item[0]))
+        prev = None
+        values = []
+        for bucket, model in ordered:
+            meta = layers.meta.get(bucket, {})
+            if meta.get("rejected") or meta.get("fossil"):
+                continue
+            width = int(model["w_expr"].shape[0])
+            logits = X[:, :width] @ model["w_expr"] + model["b_expr"]
+            logits -= logits.max(axis=1, keepdims=True)
+            p = np.exp(logits); p /= p.sum(axis=1, keepdims=True)
+            if prev is not None:
+                values.append(float(np.abs(p - prev).sum(axis=1).mean()) / 2.0)
+            prev = p
+        diversity = round(float(np.mean(values)) if values else 0.0, 3)
+    except Exception:  # noqa: BLE001
+        pass
+    uncertain_share = float(np.mean((entropy > 0.7) & (top1 < 0.6)))
+    return {
+        "ok": True, "states": len(rows), "accuracy": round(accuracy, 3),
+        "diversity": diversity,
+        "uncertainty": round(float(entropy.mean()), 3),
+        "uncertain_share": round(uncertain_share, 3),
+        "calibration_error": ece,
+        "note": "diversity 是层间差异（正常），uncertainty 是它对答案没把握（要降）",
+    }
 
 
 def life_maturity():
-    """数字生命成熟度自评：从现有数据算，给差距清单。"""
+    """数字生命成熟度：质量分，不再奖励“数量堆叠”。"""
+    import math as _math
     mem = memory.stats()
     layers_n = len(layers.models)
-    memes = evolution.weight_memes()
-    genes = evolution.code_genomes()
+    active = [(b, m) for b, m in layers.meta.items()
+              if not m.get("rejected") and not m.get("fossil")]
+    bloat = 1.0 - (len(active) / max(1, len(layers.meta)))
+    quality_values = [float(m.get("recent_accuracy") or m.get("accuracy_expression") or 0.3)
+                      for _b, m in active]
+    layer_quality = sum(quality_values) / len(quality_values) if quality_values else 0.0
+    rows = layers._rows()[-120:]
+    accuracy = None
+    ece = None
+    probs, y = layers.ensemble_matrix(rows)
+    if probs is not None and len(probs) >= 8:
+        accuracy = float((probs.argmax(axis=1) == y).mean())
+        ece, _ = layers.calibration_error(probs, y)
     cons = self_model.snapshot().get("consistency") or {}
-    bench = _bench_history()
     values_count = len(values.frame.get("principles", []))
     consolidations = int((_loop_state.get("consolidations") or 0))
     try:
-        conn = sqlite3.connect(str(DATA / "trajectory.db"), timeout=5)
-        trajectories = conn.execute("SELECT COUNT(*) FROM trajectories").fetchone()[0] or 0
-        conn.close()
-    except sqlite3.Error:
-        trajectories = 0
+        organs_now = organs.summary()
+    except Exception:  # noqa: BLE001
+        organs_now = {}
+    intents = int(organs_now.get("intents") or 0)
+    active_intents = len(organs_now.get("active_intents") or [])
+    bench = _bench_history()
+    clean = [run for run in bench if (run.get("context") or {}).get("observation")] or bench
+    trend = None
+    if len(clean) >= 2:
+        trend = float(clean[-1].get("score") or 0) - float(clean[0].get("score") or 0)
+    trend_score = 50.0 if trend is None else max(0.0, min(100.0, 50.0 + trend * 200))
+    try:
+        with open(SYSTEM_EVENTS, "r", encoding="utf-8") as handle:
+            system_kinds = {json.loads(line).get("kind") for line in handle if line.strip()}
+    except (OSError, ValueError):
+        system_kinds = set()
+    provenance = memory.source_stats()
+    perception_sources = len([kind for kind, count in provenance.items() if count and kind in ("perception", "imagined")])
+    perception_sources += len(system_kinds)
+    observation = observation_state()
+    observation_days = 0
+    if observation.get("start_ts"):
+        observation_days = int((time.time() - float(observation["start_ts"])) // 86400) + 1
+    started = float((_presence or {}).get("started_at") or time.time())
+    uptime_hours = (time.time() - started) / 3600.0
     scores = {
-        "表达": 80,
-        "记忆": min(100, int(mem.get("count", 0) * 2.5 + trajectories / 8 + layers_n * 2)),
-        "自我": min(100, int((cons.get("score") or 0) * 50 + values_count * 6 + (10 if cons.get("checks") else 0))),
-        "学习": min(100, int(layers_n * 4 + consolidations * 4 + (bench[-1]["score"] * 30 if bench else 0))),
-        "持续": 55,
-        "自主": min(100, int(len([m for m in memes if m.get("kind") in ("active", "boundary")]) * 10 + consolidations * 3)),
-        "感知": 40,
+        "表达": int(round((accuracy or 0.3) * 100)),
+        "记忆": min(100, int(30 + _math.log2(max(1, mem.get("count", 0)) + 1) * 18 + len([k for k, v in provenance.items() if v]) * 4)),
+        "自我": min(100, int((cons.get("score") or 0) * 60 + values_count * 8 + (10 if cons.get("checks") else 0))),
+        "学习": max(0, min(100, int(0.5 * (accuracy or 0.3) * 100 + 0.3 * layer_quality * 100
+                                      + 0.2 * trend_score - bloat * 40))),
+        "持续": min(100, int(20 + uptime_hours * 3 + observation_days * 5)),
+        "自主": min(100, int(intents * 12 + active_intents * 15 + consolidations * 2)),
+        "感知": min(100, 20 + perception_sources * 12),
     }
     overall = round(sum(scores.values()) / len(scores), 1)
     if overall >= 80:
@@ -2496,24 +2577,34 @@ def life_maturity():
         gaps.append("缺少原生感知：摄像头、通知、系统状态都还没接")
     if scores["自主"] < 70:
         gaps.append("缺少自主目标：没有内在动机和长期计划")
+    if (accuracy or 0) < 0.55:
+        gaps.append("行为层准确率不足 0.55：表情/动作还不稳")
+    if bloat > 0.3:
+        gaps.append("层里有 %.0f%% 是化石/重复：数量虚高，需要治理" % (bloat * 100))
     gaps.append("语言层不可训练：台词来自账号模型，不是她自己的权重")
-    gaps.append("没有图丫丫式算力：手机 CPU 训 2KB 小模型，不是量子计算机")
     return {
         "overall": overall,
         "level": level,
         "scores": scores,
+        "basis": {
+            "行为准确率": round(accuracy, 3) if accuracy is not None else None,
+            "校准误差": ece,
+            "层平均质量": round(layer_quality, 3),
+            "层膨胀率": round(bloat, 3),
+            "跨天趋势": round(trend, 3) if trend is not None else None,
+        },
         "gaps": gaps,
         "facts": {
             "记忆条数": mem.get("count", 0),
-            "轨迹条数": trajectories,
+            "轨迹条数": len(rows),
             "时代层": layers_n,
-            "权重模因": len(memes),
-            "代码基因": len(genes),
-            "三观原则": values_count,
+            "活跃层": len(active),
             "巩固次数": consolidations,
-            "自评基准": bench[-1]["score"] if bench else None,
+            "自评基准": clean[-1]["score"] if clean else None,
             "自我一致性": cons.get("score"),
+            "意图数": intents,
         },
+        "note": "成熟度现在是质量分：准确率、校准、层质量、趋势加权，并扣除化石/重复层",
     }
 
 
@@ -3832,6 +3923,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, "not found", "text/plain; charset=utf-8")
             content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
             return self._send(200, target.read_bytes(), content_type)
+        if path == "/api/metrics/uncertainty":
+            return self._send(200, uncertainty_metrics())
         if path == "/api/thoughts/recent":
             items = []
             try:
