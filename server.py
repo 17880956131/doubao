@@ -561,6 +561,7 @@ SOCIAL = DATA / "social.json"
 ENVIRONMENT = DATA / "environment.json"
 CURIOSITY = DATA / "curiosity.jsonl"
 PREDICTIONS = DATA / "predictions.jsonl"
+CORRECTIONS = DATA / "corrections.jsonl"
 HALLUCINATIONS = DATA / "hallucinations.jsonl"
 
 
@@ -648,12 +649,43 @@ def compare_prediction(entity, fact_text):
             bigrams_b = {fact_text[i:i + 2] for i in range(max(0, len(fact_text) - 1))}
             overlap = len(bigrams_a & bigrams_b) / max(1, len(bigrams_a) or 1)
             cosine = round(overlap, 3)
-        reward = 1.0 if cosine >= 0.7 else (0.0 if cosine >= 0.45 else -1.0)
+        # 数字/否定词矛盾：向量相似度抓不到，单独判
+        import re as _re
+        def numbers(text):
+            mapping = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+                       "七": 7, "八": 8, "九": 9, "十": 10, "百": 100, "千": 1000}
+            found = set(int(n) for n in _re.findall(r"\d+", text))
+            for char in text:
+                if char in mapping:
+                    found.add(mapping[char])
+            return found
+        guess_numbers = numbers(guess)
+        fact_numbers = numbers(fact_text)
+        contradiction = bool(guess_numbers and fact_numbers and guess_numbers != fact_numbers)
+        negations = ("不", "没", "无", "非", "别")
+        guess_neg = any(word in guess for word in negations)
+        fact_neg = any(word in fact_text for word in negations)
+        if guess_neg != fact_neg and abs(len(guess) - len(fact_text)) < 20:
+            contradiction = True
+        if contradiction:
+            reward = -1.0
+        else:
+            reward = 1.0 if cosine >= 0.7 else (0.0 if cosine >= 0.45 else -1.0)
         record = {"ts": time.time(), "entity": name, "guess": guess,
                   "fact": fact_text[:200], "cosine": cosine,
                   "verdict": "一致" if reward > 0 else ("部分一致" if reward == 0 else "幻觉"),
                   "reward": reward}
         _append_jsonl(HALLUCINATIONS, record)
+        if reward <= 0:
+            _append_jsonl(CORRECTIONS, {
+                "ts": time.time(), "entity": name,
+                "messages": [
+                    {"role": "system", "content": "你是豆宝。回答要短、要准，不确定就说不确定。"},
+                    {"role": "user", "content": name + "是什么？"},
+                    {"role": "assistant", "content": fact_text[:300]},
+                ],
+                "wrong_guess": guess,
+            })
         item["status"] = "compared"
         item["cosine"] = cosine
         item["verdict"] = record["verdict"]
@@ -4387,6 +4419,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, prune_preview(threshold))
         if path == "/api/metrics/uncertainty":
             return self._send(200, uncertainty_metrics())
+        if path == "/api/knowledge/status":
+            import knowledge
+            return self._send(200, knowledge.status())
         if path == "/api/hallucination/stats":
             return self._send(200, hallucination_stats())
         if path == "/api/curiosity/predictions":
@@ -5421,6 +5456,9 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
+        if path == "/api/knowledge/train":
+            import knowledge
+            return self._send(200, knowledge.train())
         if path == "/api/curiosity/predict":
             return self._send(200, curiosity_predict(str(body.get("entity") or ""),
                                                      body.get("guess"),
