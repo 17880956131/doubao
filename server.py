@@ -559,6 +559,150 @@ SYSTEM_EVENTS = DATA / "system_events.jsonl"
 SELF_CORE = DATA / "self_core.json"
 SOCIAL = DATA / "social.json"
 ENVIRONMENT = DATA / "environment.json"
+CURIOSITY = DATA / "curiosity.jsonl"
+
+
+def _load_curiosity():
+    items = []
+    try:
+        with open(CURIOSITY, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        return []
+    return items
+
+
+def curiosity_queue():
+    pending = {}
+    for item in _load_curiosity():
+        if item.get("status") == "resolved":
+            continue
+        key = str(item.get("entity") or "")
+        if key and (key not in pending or item.get("score", 0) > pending[key].get("score", 0)):
+            pending[key] = item
+    return sorted(pending.values(), key=lambda item: -float(item.get("score") or 0))
+
+
+def curiosity_entities(text):
+    """好奇心用的实体抽取：过滤口头语，保留概念词。"""
+    import re as _re
+    text = str(text or "")
+    stop = {"听说", "觉得", "知道", "一个", "这个", "那个", "什么", "怎么", "为什么",
+            "可以", "可能", "应该", "但是", "所以", "因为", "如果", "就是", "真的", "好像"}
+    found = []
+    for pattern in (r"叫[做]?([\u4e00-\u9fffA-Za-z0-9]{2,14}?)(?:的|是|，|。|$)",
+                    r"关于([\u4e00-\u9fffA-Za-z0-9]{2,10})",
+                    r"([\u4e00-\u9fff]{2,10}(?:效应|现象|定理|理论|实验|反应|机制|算法|模型|生物|星系|星球|鱼))"):
+        for match in _re.findall(pattern, text):
+            candidate = str(match).strip("的了呢啊呀吧")
+            if candidate and candidate not in stop and candidate not in found:
+                found.append(candidate[:12])
+    if not found:
+        for part in _re.split(r"[，。；！？、\s]", text):
+            part = part.strip("的了呢啊呀吧")
+            if 2 <= len(part) <= 8 and part not in stop and not part.startswith(("我", "你", "他", "她")):
+                found.append(part)
+    return found[:6]
+
+
+def curiosity_scan(text, session="main"):
+    """好奇心：不确定性 × 相关性 × 新颖性 - 成本。"""
+    import math as _math
+    text = str(text or "").strip()
+    if not text:
+        return {"ok": False, "reason": "没有内容"}
+    entities = curiosity_entities(text)
+    if not entities:
+        return {"ok": True, "entities": 0, "queued": 0}
+    try:
+        query_blob = memory._embed(text)
+    except Exception:  # noqa: BLE001
+        query_blob = None
+    queued = []
+    existing = {str(item.get("entity")) for item in curiosity_queue()}
+    for entity in entities[:6]:
+        if entity in existing:
+            continue
+        try:
+            rows = graph.conn.execute(
+                "SELECT mentions FROM nodes WHERE name = ? OR name LIKE ? OR ? LIKE '%' || name || '%' LIMIT 6",
+                (entity, "%" + entity + "%", entity)).fetchall()
+            mentions = max([int(row[0] or 0) for row in rows] or [0])
+            nodes = rows
+        except Exception:  # noqa: BLE001
+            nodes = []
+            mentions = 0
+        novelty = 1.0 if not nodes else max(0.1, 1.0 - min(1.0, mentions / 5.0))
+        relevance = 0.6
+        if query_blob is not None:
+            try:
+                entity_blob = memory._embed(entity)
+                if entity_blob is not None:
+                    import struct
+                    a = struct.unpack("<768f", query_blob)
+                    b = struct.unpack("<768f", entity_blob)
+                    relevance = max(0.0, min(1.0, sum(x * y for x, y in zip(a, b))))
+            except Exception:  # noqa: BLE001
+                pass
+        uncertainty = 1.0 - min(1.0, mentions / 5.0)
+        score = round(max(0.0, novelty * relevance * uncertainty - 0.15), 3)
+        if score <= 0:
+            continue
+        item = {"ts": time.time(), "entity": entity, "score": score,
+                "context": text[:120], "session": session, "status": "pending"}
+        try:
+            with open(CURIOSITY, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+        except OSError:
+            continue
+        queued.append(item)
+    return {"ok": True, "entities": len(entities), "queued": len(queued), "items": queued}
+
+
+def curiosity_resolve(text):
+    """读到内容后，把命中的待查实体标记为已解渴。"""
+    try:
+        from memory_graph import extract_entities
+        entities = set(extract_entities(text))
+    except Exception:  # noqa: BLE001
+        entities = set()
+    if not entities:
+        return {"ok": True, "resolved": 0}
+    updated = 0
+    lines = []
+    try:
+        with open(CURIOSITY, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return {"ok": True, "resolved": 0}
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            out.append(line)
+            continue
+        if item.get("status") != "resolved" and any(entity in str(item.get("entity")) or str(item.get("entity")) in entity for entity in entities):
+            item["status"] = "resolved"
+            item["resolved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            updated += 1
+        out.append(json.dumps(item, ensure_ascii=False))
+    try:
+        with open(CURIOSITY, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(out) + ("\n" if out else ""))
+    except OSError:
+        pass
+    return {"ok": True, "resolved": updated}
 PLANETS = DATA / "planets"
 
 
@@ -1229,6 +1373,10 @@ def orchestrate(payload):
         pass
     try:
         organs.observe({"kind": "chat", "text": content, "intensity": 0.5})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        curiosity_scan(content, session)
     except Exception:  # noqa: BLE001
         pass
     reply_raw = None
@@ -4123,6 +4271,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, prune_preview(threshold))
         if path == "/api/metrics/uncertainty":
             return self._send(200, uncertainty_metrics())
+        if path == "/api/curiosity/queue":
+            return self._send(200, {"items": curiosity_queue()[:20]})
         if path == "/api/actions/recent":
             items = []
             try:
@@ -5151,6 +5301,11 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
+        if path == "/api/curiosity/scan":
+            return self._send(200, curiosity_scan(str(body.get("text") or ""),
+                                                  str(body.get("session") or "main")))
+        if path == "/api/curiosity/resolve":
+            return self._send(200, curiosity_resolve(str(body.get("text") or "")))
         if path == "/api/action/search":
             query = str(body.get("query") or "").strip()
             if not query:
@@ -5176,6 +5331,10 @@ class Handler(BaseHTTPRequestHandler):
                            source="web", session="reading", person="owner")
             except Exception as error:  # noqa: BLE001
                 return self._send(200, {"ok": False, "reason": str(error)[:80]})
+            try:
+                curiosity_resolve(text)
+            except Exception:  # noqa: BLE001
+                pass
             log_event("memory-note", {"chars": len(text), "url": url[:80]})
             return self._send(200, {"ok": True, "text": note})
         if path == "/api/voice/transcript":
