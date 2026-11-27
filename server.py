@@ -642,7 +642,27 @@ def imagine_scene(force=False):
         text = options[int(time.time()) % len(options)]
     if not text:
         return {"ok": False, "reason": "想象不出来"}
-    entry = {"ts": time.time(), "text": text, "hour": hour, "mood": mood_label}
+    expression = "neutral"
+    gesture = ""
+    try:
+        prediction = layers.predict(_presence.get("expression") or "neutral",
+                                    _presence.get("gesture") or "", False, {},
+                                    mood_label, text=text)
+        if prediction:
+            expression = prediction.get("expression") or "neutral"
+            gesture = prediction.get("gesture") or ""
+    except Exception:  # noqa: BLE001
+        pass
+    if hour >= 22 or hour < 6:
+        expression = "sad" if expression == "neutral" else expression
+        gesture = gesture or "tilt"
+    try:
+        save_presence({"last_event": "imagination", "expression": expression,
+                       "gesture": gesture, "mood": mood_label})
+    except Exception:  # noqa: BLE001
+        pass
+    entry = {"ts": time.time(), "text": text, "hour": hour, "mood": mood_label,
+             "expression": expression, "gesture": gesture}
     try:
         with open(IMAGINATION_LOG, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -653,7 +673,8 @@ def imagine_scene(force=False):
     except Exception:  # noqa: BLE001
         pass
     try:
-        publish({"type": "imagination", "text": text})
+        publish({"type": "imagination", "text": text, "expression": expression,
+                 "gesture": gesture})
     except Exception:  # noqa: BLE001
         pass
     state["last_ts"] = time.time()

@@ -959,7 +959,11 @@ function setupPerception() {
       const data = await response.json()
       eventSeq = typeof data.seq === 'number' ? data.seq : eventSeq
       for (const event of data.events || []) {
-        if (event.type === 'imagination' && event.text) addBubble('豆宝（想象）', event.text)
+        if (event.type === 'imagination' && event.text) {
+          addBubble('豆宝（想象）', event.text)
+          if (event.expression) setExpression(event.expression)
+          if (event.gesture) startGesture(event.gesture)
+        }
         reactScene(event.type || 'external', event)
       }
     } catch (err) { /* 下一轮再试 */ }
