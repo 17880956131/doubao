@@ -23,9 +23,26 @@ class MemoryStore:
                 ts REAL, kind TEXT, text TEXT, importance REAL,
                 embedding BLOB, last_used REAL, hits INTEGER)"""
         )
+        columns = [row[1] for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()]
+        if "source" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'perception'")
+            self.conn.commit()
         self.conn.commit()
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_ts ON memories(ts)")
         self.conn.commit()
+
+    @staticmethod
+    def infer_source(kind):
+        mapping = {
+            "imagination": "imagined",
+            "system": "perception", "image": "perception", "voice": "perception",
+            "scene": "perception",
+            "chat": "chat",
+            "fact": "fact",
+            "diary": "reflection",
+            "joke": "generated",
+        }
+        return mapping.get(kind, "unknown")
 
     def _embed(self, text):
         key = hashlib.sha1(text.encode("utf-8")).hexdigest()
@@ -45,41 +62,51 @@ class MemoryStore:
             self.cache.clear()
         return blob
 
-    def add(self, kind, text, importance=0.35):
+    def add(self, kind, text, importance=0.35, source=None):
         text = str(text).strip()[:1000]
         if not text:
             return False
         blob = self._embed(text)
+        source = source or self.infer_source(kind)
         with self.lock:
             self.conn.execute(
-                "INSERT INTO memories (ts,kind,text,importance,embedding,last_used,hits) VALUES (?,?,?,?,?,?,0)",
-                (time.time(), kind, text, float(importance), blob, time.time()),
+                "INSERT INTO memories (ts,kind,text,importance,embedding,last_used,hits,source) VALUES (?,?,?,?,?,?,0,?)",
+                (time.time(), kind, text, float(importance), blob, time.time(), source),
             )
             self.conn.commit()
         return blob is not None
 
-    def search(self, query, k=4, min_score=0.3):
+    def search(self, query, k=4, min_score=0.3, include_imagined=False, with_source=False):
         blob = self._embed(query)
         if blob is None:
             return []
         query_vec = struct.unpack(f"<{EMBED_DIMS}f", blob)
         rows = self.conn.execute(
-            "SELECT id,kind,text,importance,embedding FROM memories WHERE embedding IS NOT NULL ORDER BY id DESC LIMIT 400"
+            "SELECT id,kind,text,importance,embedding,source FROM memories WHERE embedding IS NOT NULL ORDER BY id DESC LIMIT 400"
         ).fetchall()
         scored = []
-        for rid, kind, text, importance, embedding in rows:
+        for rid, kind, text, importance, embedding, source in rows:
             if not embedding or len(embedding) != EMBED_DIMS * 4:
+                continue
+            if not include_imagined and (source or "unknown") == "imagined":
                 continue
             vec = struct.unpack(f"<{EMBED_DIMS}f", embedding)
             score = sum(a * b for a, b in zip(query_vec, vec)) + (importance or 0) * 0.05
-            scored.append((score, rid, kind, text))
+            scored.append((score, rid, kind, text, source))
         scored.sort(reverse=True)
         hits = [item for item in scored[:k] if item[0] >= min_score]
         with self.lock:
-            for _, rid, _, _ in hits:
+            for _, rid, _, _, _ in hits:
                 self.conn.execute("UPDATE memories SET last_used=?, hits=hits+1 WHERE id=?", (time.time(), rid))
             self.conn.commit()
-        return [(kind, text) for _, _, kind, text in hits]
+        if with_source:
+            return [{"kind": kind, "text": text, "source": source or "unknown"}
+                    for _, _, kind, text, source in hits]
+        return [(kind, text) for _, _, kind, text, _ in hits]
+
+    def source_stats(self):
+        rows = self.conn.execute("SELECT COALESCE(source,'unknown'), COUNT(*) FROM memories GROUP BY source").fetchall()
+        return {str(source): int(count) for source, count in rows}
 
     def recent(self, limit=8):
         rows = self.conn.execute("SELECT ts,kind,text,importance FROM memories ORDER BY id DESC LIMIT ?", (limit,)).fetchall()

@@ -3093,13 +3093,26 @@ def synth_cached(text, voice, rate):
 
 def memory_context(message):
     try:
-        hits = memory.search(message, k=4)
+        hits = memory.search(message, k=4, with_source=True)
     except Exception:  # noqa: BLE001
         return ""
-    hits = [(kind, text) for kind, text in hits if kind != "joke"]
-    if not hits:
+    lines = []
+    for hit in hits:
+        if hit.get("kind") == "joke":
+            continue
+        source = hit.get("source")
+        text = str(hit.get("text") or "")[:120]
+        if source == "imagined":
+            lines.append("- 我想象过：" + text)
+        elif source == "fact":
+            lines.append("- 你确认过：" + text)
+        elif source == "reflection":
+            lines.append("- 我反思过：" + text)
+        else:
+            lines.append("- " + text)
+    if not lines:
         return ""
-    return "你记得这些（自然引用，别生硬复述）：\n" + "\n".join("- " + text[:120] for _, text in hits)
+    return "你记得这些（自然引用，别生硬复述）：\n" + "\n".join(lines)
 
 
 def arbitrate(reply, state, user_text=None):
@@ -3630,6 +3643,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/system/recent":
             return self._send(200, {"events": load_system_events(20),
                                     "summary": (lambda: (json.load(open(SYSTEM_DIGEST, encoding="utf-8")).get("summary") if SYSTEM_DIGEST.exists() else None))()})
+        if path == "/api/memory/provenance":
+            return self._send(200, {"by_source": memory.source_stats(),
+                                    "note": "imagined 是想象，检索默认不当作事实"})
+        if path == "/api/memory/search":
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            q = (query.get("q", [""])[0] or "").strip()
+            include = (query.get("include", [""])[0] or "").strip() == "imagined"
+            return self._send(200, {"query": q, "include_imagined": include,
+                                    "hits": memory.search(q, k=6, with_source=True,
+                                                          include_imagined=include)})
         if path == "/api/imagination/recent":
             recent = []
             try:
@@ -5190,7 +5213,7 @@ def build_initiative():
     _last_initiative = now_ts
     fact_hint = ""
     try:
-        hits = memory.search("用户喜欢的东西和习惯", k=1)
+        hits = memory.search("用户喜欢的东西和习惯", k=1, include_imagined=False)
         if hits:
             fact_hint = " 对了，我记得" + hits[0][1][:40].replace("记住，", "") + "。"
     except Exception:  # noqa: BLE001
