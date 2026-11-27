@@ -558,7 +558,31 @@ MM_DIR = DATA / "media"
 SYSTEM_EVENTS = DATA / "system_events.jsonl"
 SELF_CORE = DATA / "self_core.json"
 SOCIAL = DATA / "social.json"
+ENVIRONMENT = DATA / "environment.json"
 PLANETS = DATA / "planets"
+
+
+def environment_state():
+    try:
+        with open(ENVIRONMENT, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        state = {}
+    state.setdefault("enabled", False)
+    state.setdefault("interval_sec", 60)
+    state.setdefault("describe_interval_sec", 600)
+    state.setdefault("change_threshold", 0.08)
+    state.setdefault("last_capture", None)
+    state.setdefault("last_describe", None)
+    return state
+
+
+def save_environment(state):
+    try:
+        with open(ENVIRONMENT, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
 
 
 def planet_dir(user="owner"):
@@ -3980,6 +4004,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/system/recent":
             return self._send(200, {"events": load_system_events(20),
                                     "summary": (lambda: (json.load(open(SYSTEM_DIGEST, encoding="utf-8")).get("summary") if SYSTEM_DIGEST.exists() else None))()})
+        if path == "/api/perception/environment":
+            return self._send(200, environment_state())
         if path == "/api/planet/identity":
             query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             user = (query.get("user", [""])[0] or "").strip() or "owner"
@@ -5043,6 +5069,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "samples": samples,
                                     "distinct": distinct,
                                     "note": "不是概率，只是多次采样的多样性"})
+        if path == "/api/perception/environment":
+            state = environment_state()
+            for key in ("enabled", "interval_sec", "describe_interval_sec", "change_threshold"):
+                if key in body:
+                    state[key] = body[key]
+            state["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            save_environment(state)
+            log_event("environment-config", {k: state.get(k) for k in ("enabled", "interval_sec", "describe_interval_sec")})
+            return self._send(200, state)
         if path == "/api/social/person":
             state = social_state()
             name = str(body.get("name") or "").strip()[:40]

@@ -1482,3 +1482,100 @@ if ($('test-mic')) $('test-mic').addEventListener('click', testMic)
 if ($('test-speaker')) $('test-speaker').addEventListener('click', testSpeaker)
 if ($('test-video')) $('test-video').addEventListener('click', toggleVideoTest)
 if ($('test-shot')) $('test-shot').addEventListener('click', testShot)
+
+// ── 环境感知：定时抓帧，变化才描述 ─────────────────
+let envStream = null
+let envTimer = null
+let envLastBrightness = null
+let envBusy = false
+let envLastPost = 0
+
+async function envConfig() {
+  try {
+    const res = await fetch('/api/perception/environment')
+    return await res.json()
+  } catch (err) { return { enabled: false, interval_sec: 60, describe_interval_sec: 600, change_threshold: 0.08 } }
+}
+
+async function setEnvStatus(text) {
+  const el = $('env-status')
+  if (el) el.textContent = text
+}
+
+async function startEnvPerception() {
+  if (envStream) return
+  try {
+    envStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+    const video = document.createElement('video')
+    video.srcObject = envStream
+    await video.play()
+    await setEnvStatus('环境感知中（摄像头）')
+    const loop = async () => {
+      if (!envStream) return
+      const cfg = await envConfig()
+      if (!cfg.enabled) { stopEnvPerception(); return }
+      if (document.visibilityState !== 'visible') { envTimer = setTimeout(loop, 5000); return }
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = 320
+        canvas.height = 240
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(video, 0, 0, 320, 240)
+        const pixels = ctx.getImageData(0, 0, 320, 240).data
+        let sum = 0
+        for (let i = 0; i < pixels.length; i += 4 * 64) {
+          sum += (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3
+        }
+        const brightness = sum / (pixels.length / (4 * 64)) / 255
+        const changed = envLastBrightness == null || Math.abs(brightness - envLastBrightness) > Number(cfg.change_threshold)
+        envLastBrightness = brightness
+        const due = Date.now() - envLastPost > Number(cfg.describe_interval_sec) * 1000
+        if (changed && due && !envBusy) {
+          envBusy = true
+          envLastPost = Date.now()
+          await setEnvStatus('看到环境有变化，正在识别…')
+          try {
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.7)
+            const res = await fetch('/api/multimodal/vision', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ image_base64: dataUrl, source: 'environment' }),
+            })
+            const data = await res.json()
+            if (data.ok && data.caption) addBubble('看到环境', data.caption)
+          } catch (err) { log('env-error', String(err)) }
+          envBusy = false
+          await setEnvStatus('环境感知中（摄像头）')
+        }
+      } catch (err) { log('env-frame-error', String(err)) }
+      envTimer = setTimeout(loop, Number(cfg.interval_sec) * 1000)
+    }
+    loop()
+  } catch (err) {
+    await setEnvStatus('摄像头打不开：' + String(err))
+  }
+}
+
+function stopEnvPerception() {
+  if (envTimer) { clearTimeout(envTimer); envTimer = null }
+  if (envStream) { envStream.getTracks().forEach((t) => t.stop()); envStream = null }
+  envLastBrightness = null
+  setEnvStatus('已关闭')
+}
+
+if ($('env-perception')) {
+  const savedEnv = localStorage.getItem('zhiming.envPerception') === '1'
+  $('env-perception').checked = savedEnv
+  if (savedEnv) startEnvPerception()
+  $('env-perception').addEventListener('change', async () => {
+    const enabled = $('env-perception').checked
+    localStorage.setItem('zhiming.envPerception', enabled ? '1' : '0')
+    try {
+      await fetch('/api/perception/environment', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      })
+    } catch (err) { log('env-config-error', String(err)) }
+    if (enabled) startEnvPerception()
+    else stopEnvPerception()
+  })
+}
