@@ -1,0 +1,109 @@
+{
+  "name": "zhiming-dsh-go",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  },
+  "dshGo": {
+    "v": 1,
+    "title": {
+      "zh": "智命",
+      "en": "ZhiMing"
+    },
+    "icon": "robot",
+    "wants": [],
+    "contributes": {
+      "composer.actions": [
+        {
+          "id": "open-status",
+          "label": {
+            "zh": "豆宝状态",
+            "en": "Doubao"
+          },
+          "icon": "robot",
+          "effect": {
+            "type": "open",
+            "page": "panel:status"
+          }
+        },
+        {
+          "id": "wake-doubao",
+          "label": {
+            "zh": "唤醒豆宝",
+            "en": "Wake"
+          },
+          "icon": "sparkle"
+        }
+      ],
+      "composer.strip": [
+        {
+          "id": "doubao-strip",
+          "icon": "robot",
+          "panel": "status"
+        }
+      ],
+      "panels": [
+        {
+          "id": "status",
+          "title": {
+            "zh": "豆宝状态",
+            "en": "Doubao"
+          },
+          "icon": "robot",
+          "placement": [
+            "session.tab",
+            "features",
+            "chat.panel"
+          ],
+          "presentation": "sheet"
+        },
+        {
+          "id": "growth",
+          "title": {
+            "zh": "豆宝成长",
+            "en": "Doubao growth"
+          },
+          "icon": "chart",
+          "placement": [
+            "session.tab",
+            "features"
+          ],
+          "presentation": "page"
+        },
+        {
+          "id": "three",
+          "title": {
+            "zh": "魂·魄·体·形",
+            "en": "Layers"
+          },
+          "icon": "sparkle",
+          "placement": [
+            "session.tab",
+            "features"
+          ],
+          "presentation": "page"
+        }
+      ],
+      "turn.note": [
+        {
+          "id": "doubao-note"
+        }
+      ]
+    }
+  },
+  "description": "智命（ZhiMing）：手机本地数字人生命模拟的 dsh-go 插件，角色仍是豆宝",
+  "license": "MIT",
+  "files": [
+    "lib",
+    "server",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

@@ -123,7 +123,7 @@ async function runTool(name, args) {
       const reply = await callApi('/api/orchestrate', {
         method: 'POST',
         body: JSON.stringify({ content: String(args.message || ''), lang: String(args.lang || 'zh'),
-                               session: 'mcp' }),
+                               session: 'main' }),
       })
       return { text: reply.text, expression: reply.expression, gesture: reply.gesture, attention: reply.arbitration && reply.arbitration.attention }
     }

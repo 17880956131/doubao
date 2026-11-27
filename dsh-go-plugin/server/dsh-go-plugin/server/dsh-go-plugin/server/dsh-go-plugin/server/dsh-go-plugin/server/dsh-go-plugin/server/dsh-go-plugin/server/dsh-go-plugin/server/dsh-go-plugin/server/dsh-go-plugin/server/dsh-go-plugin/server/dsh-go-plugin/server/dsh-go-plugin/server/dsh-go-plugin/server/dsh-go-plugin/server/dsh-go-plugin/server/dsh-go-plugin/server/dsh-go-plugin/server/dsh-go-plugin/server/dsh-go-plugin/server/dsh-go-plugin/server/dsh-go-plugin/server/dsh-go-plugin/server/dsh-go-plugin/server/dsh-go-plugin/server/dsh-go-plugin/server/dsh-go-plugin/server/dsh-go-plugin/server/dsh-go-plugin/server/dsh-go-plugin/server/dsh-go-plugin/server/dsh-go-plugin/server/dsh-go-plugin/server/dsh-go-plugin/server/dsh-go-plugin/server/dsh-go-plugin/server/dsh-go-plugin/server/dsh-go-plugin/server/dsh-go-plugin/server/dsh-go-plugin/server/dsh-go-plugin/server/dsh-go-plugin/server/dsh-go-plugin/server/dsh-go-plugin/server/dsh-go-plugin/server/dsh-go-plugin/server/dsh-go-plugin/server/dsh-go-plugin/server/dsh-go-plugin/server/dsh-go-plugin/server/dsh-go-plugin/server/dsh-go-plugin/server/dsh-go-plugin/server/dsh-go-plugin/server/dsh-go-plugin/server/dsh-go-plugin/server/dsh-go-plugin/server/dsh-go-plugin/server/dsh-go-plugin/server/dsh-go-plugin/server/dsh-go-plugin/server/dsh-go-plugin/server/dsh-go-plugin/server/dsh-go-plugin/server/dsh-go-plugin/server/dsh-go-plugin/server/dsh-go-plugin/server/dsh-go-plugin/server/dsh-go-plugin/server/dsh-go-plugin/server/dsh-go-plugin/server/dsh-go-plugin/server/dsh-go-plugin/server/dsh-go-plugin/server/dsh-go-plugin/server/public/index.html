@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#141225">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<title>豆宝 · 数字人舞台</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: radial-gradient(120% 80% at 50% 0%, #2a2350 0%, #17142b 45%, #0d0b18 100%); color: #f3eefc; font-family: -apple-system, "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif; }
+  canvas#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  header { position: fixed; top: env(safe-area-inset-top, 12px); left: 0; right: 0; padding: 14px 18px 0; display: flex; align-items: center; gap: 8px; pointer-events: none; }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .5px; margin: 0; opacity: .9; }
+  header .dot { width: 7px; height: 7px; border-radius: 50%; background: #7dffb2; box-shadow: 0 0 8px #7dffb2; }
+  #status { position: fixed; top: calc(env(safe-area-inset-top, 12px) + 44px); left: 0; right: 0; text-align: center; font-size: 13px; color: #cfc6ea; opacity: .85; min-height: 18px; pointer-events: none; }
+  #subtitle { position: fixed; left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom, 10px) + 168px); text-align: center; font-size: 17px; line-height: 1.5; font-weight: 600; text-shadow: 0 2px 12px rgba(0,0,0,.65); pointer-events: none; transition: opacity .2s; }
+  #subtitle span { opacity: .45; }
+  #subtitle b { color: #b79bff; }
+  #chatlog { position: fixed; left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom, 10px) + 214px); max-height: 30vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; pointer-events: none; -webkit-mask-image: linear-gradient(to top, #000 70%, transparent); mask-image: linear-gradient(to top, #000 70%, transparent); }
+  .bubble { align-self: flex-start; max-width: 84%; background: rgba(38,32,64,.72); backdrop-filter: blur(6px); border: 1px solid rgba(160,140,255,.18); border-radius: 14px; padding: 7px 11px; font-size: 13px; line-height: 1.45; }
+  .bubble.me { align-self: flex-end; background: rgba(110,80,220,.5); }
+  .bubble b { font-size: 11px; opacity: .7; display: block; margin-bottom: 2px; font-weight: 500; }
+  #dock { position: fixed; left: 0; right: 0; bottom: 0; padding: 10px 14px calc(env(safe-area-inset-bottom, 10px) + 10px); background: linear-gradient(to top, rgba(13,11,24,.94) 60%, rgba(13,11,24,0)); display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  button { font: inherit; font-size: 13px; color: #efe9ff; background: rgba(58,48,96,.75); border: 1px solid rgba(160,140,255,.22); border-radius: 999px; padding: 9px 13px; cursor: pointer; transition: transform .08s, background .15s; }
+  button:active { transform: scale(.96); background: rgba(88,70,150,.85); }
+  button.primary { background: linear-gradient(135deg, #6d4bff, #a15bff); border-color: transparent; font-weight: 600; }
+  button.ghost { background: transparent; padding: 6px 10px; font-size: 12px; }
+  #say { flex: 1; min-width: 0; font: inherit; font-size: 14px; color: #f3eefc; background: rgba(38,32,64,.8); border: 1px solid rgba(160,140,255,.22); border-radius: 999px; padding: 10px 14px; outline: none; }
+  #say::placeholder { color: #9c92bd; }
+  .tips { font-size: 11px; color: #9c92bd; text-align: center; }
+  #settings { position: fixed; inset: 0; background: rgba(8,6,16,.78); backdrop-filter: blur(8px); display: flex; align-items: flex-end; z-index: 20; }
+  #settings.hidden { display: none; }
+  .sheet { width: 100%; background: #1a1630; border-radius: 20px 20px 0 0; padding: 18px 18px calc(env(safe-area-inset-bottom, 10px) + 18px); display: flex; flex-direction: column; gap: 12px; border-top: 1px solid rgba(160,140,255,.25); }
+  .sheet h2 { margin: 0; font-size: 15px; }
+  .field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: #b9aee0; }
+  .field select, .field input { font: inherit; font-size: 14px; color: #f3eefc; background: #241e3d; border: 1px solid rgba(160,140,255,.25); border-radius: 10px; padding: 9px 11px; outline: none; }
+  #wake { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; background: radial-gradient(80% 60% at 50% 40%, rgba(64,44,130,.75), rgba(10,8,20,.96)); z-index: 30; text-align: center; padding: 24px; }
+  #wake h2 { margin: 0; font-size: 20px; }
+  #wake p { margin: 0; font-size: 13px; color: #bdb2e2; line-height: 1.6; max-width: 300px; }
+  #wake button { padding: 13px 30px; font-size: 15px; }
+  #wake.gone { display: none; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<header><span class="dot"></span><h1>豆宝 · 数字人舞台</h1><span id="mood" style="font-size:12px;opacity:.7"></span></header>
+<div id="status"></div>
+<div id="chatlog"></div>
+<div id="subtitle"></div>
+
+<div id="dock">
+  <div class="row">
+    <button class="primary" id="joke">讲个笑话</button>
+    <button data-expr="happy">开心</button>
+    <button data-expr="sad">难过</button>
+    <button data-expr="surprised">惊讶</button>
+    <button data-expr="shy">害羞</button>
+    <button id="stop">停止</button>
+  </div>
+  <div class="row">
+    <button id="talk">说话</button>
+    <input id="say" placeholder="跟豆宝说点什么…" enterkeyhint="send">
+    <button class="primary" id="send">发送</button>
+  </div>
+  <div class="row" style="justify-content:flex-start">
+    <button class="ghost" id="settings-btn">设置</button>
+    <button class="ghost" id="lang">中文</button>
+    <button class="ghost" id="motion">换个动作</button>
+    <button class="ghost" id="selfcheck">看自己</button>
+  </div>
+</div>
+
+<div id="settings" class="hidden">
+  <div class="sheet">
+    <h2>设置</h2>
+    <label class="field">音色
+      <select id="voice">
+        <option value="zh-CN-XiaoxiaoNeural">晓晓 · 女声温柔</option>
+        <option value="zh-CN-YunxiNeural">云希 · 男声阳光</option>
+        <option value="zh-CN-YunyangNeural">云扬 · 男声播音</option>
+        <option value="zh-CN-XiaoyiNeural">晓伊 · 女声活泼</option>
+      </select>
+    </label>
+    <label class="field">语速
+      <select id="rate">
+        <option value="+0%">正常</option>
+        <option value="+10%">快一点</option>
+        <option value="+20%">很快</option>
+        <option value="-8%">慢一点</option>
+      </select>
+    </label>
+    <label class="field">大脑
+      <select id="brain">
+        <option value="account">DSH 账号（免 Key，默认）</option>
+        <option value="deepseek">DeepSeek 官方 API（填 Key）</option>
+        <option value="local">本机模型（GGUF · 127.0.0.1:8181）</option>
+        <option value="custom">自定义 OpenAI 兼容接口</option>
+      </select>
+    </label>
+    <label class="field">API Key（只存在本机浏览器）
+      <input id="key" type="password" placeholder="sk-… 不填也能讲笑话">
+    </label>
+    <label class="field">接口地址（自定义模式）
+      <input id="baseurl" placeholder="http://127.0.0.1:8080/v1">
+    </label>
+    <label class="field">模型名（自定义模式）
+      <input id="model" placeholder="qwen2.5-0.5b">
+    </label>
+    <label class="field">笑话来源
+      <select id="jokesource">
+        <option value="auto">自动（有 Key 用模型，否则内置库）</option>
+        <option value="model">本地模型现编</option>
+        <option value="bank">内置笑话库</option>
+      </select>
+    </label>
+    <div class="field"><label>反馈来源</label><select id="source">
+      <option value="owner">我本人（owner）</option>
+      <option value="guest">访客（guest）</option>
+    </select></div>
+    <button class="ghost" id="correct-btn">纠正她刚才的表现</button>
+    <div class="field"><label><input type="checkbox" id="vision-loop"> 连续视觉（定时抓帧接入）</label></div>
+    <div class="field"><label>多模态接入</label>
+      <div class="row" style="gap:6px">
+        <button id="mm-camera">拍照</button>
+        <label class="ghost" style="padding:8px 12px;border-radius:10px">图片<input type="file" id="mm-image" accept="image/*" style="display:none"></label>
+        <label class="ghost" style="padding:8px 12px;border-radius:10px">语音<input type="file" id="mm-audio-file" accept="audio/*" style="display:none"></label>
+      </div>
+    </div>
+    <div class="field"><label><input type="checkbox" id="stage-only" checked> 演出模式（舞台只演 DSH 会话，不自己聊天）</label></div>
+    <div class="field"><label><input type="checkbox" id="mirror-toggle" checked> 镜像 DSH 会话（电话/文字同步到舞台）</label></div>
+    <div class="field"><label><input type="checkbox" id="outbox-toggle"> 舞台输入发给 DSH 会话（走信箱）</label></div>
+    <div class="field"><label>反馈她刚才的反应</label>
+      <div class="row" style="gap:6px">
+        <button id="fb-over">反应过度</button>
+        <button id="fb-miss">该有反应没有</button>
+        <button id="fb-ok">反应正确</button>
+      </div>
+    </div>
+    <div class="field" id="valuesReview" style="font-size:12px;line-height:1.6"></div>
+    <div class="field" id="chart" style="font-size:12px"></div>
+    <div class="field" id="dashboard" style="font-size:12px;line-height:1.6;color:#9f93c8"></div>
+    <div class="field" id="behaviorStats" style="font-size:12px;line-height:1.6;color:#b9aee0">行为模型加载中…</div>
+    <label class="field" style="flex-direction:row;align-items:center;gap:8px">
+      <input id="autoreact" type="checkbox" style="width:auto">
+      <span>主动互动（环境感知：电量/网络/回来/深夜/发呆）</span>
+    </label>
+    <div class="row">
+      <button class="primary" id="settings-save" style="flex:1">保存</button>
+      <button id="narrate">让她说说自己</button>
+      <button id="settings-close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="wake">
+  <h2>点一下，唤醒豆宝</h2>
+  <p>一个住在你手机里的数字人：会眨眼、会换表情、说话有口型。<br>首次点按是为了解锁声音。</p>
+  <button class="primary" id="wake-btn">唤醒</button>
+</div>
+
+<script>
+  window.__stageFail = function (what) {
+    document.getElementById('status').textContent = '加载失败：' + what
+    fetch('/api/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: 'asset-error', detail: what }) }).catch(function () {})
+  }
+  window.addEventListener('error', function (e) {
+    fetch('/api/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: 'window-error', detail: String(e.message || '') + ' @ ' + String(e.filename || '').slice(-40) + ':' + e.lineno }) }).catch(function () {})
+  })
+</script>
+<script src="./lib/pixi.min.js" onerror="__stageFail('pixi')"></script>
+<script src="./lib/live2d.min.js" onerror="__stageFail('live2d-core')"></script>
+<script>window.process = window.process || { env: { NODE_ENV: "production" } }</script>
+<script src="./lib/cubism4core.min.js" onerror="__stageFail('cubism4-core')"></script>
+<script>
+  (function () {
+    var runtime = new URLSearchParams(location.search).get('runtime') === 'cubism4' ? 'cubism4' : 'cubism2'
+    var s = document.createElement('script')
+    s.src = './lib/' + runtime + '.min.js'
+    s.onerror = function () { window.__stageFail(runtime) }
+    s.onload = function () {
+      var a = document.createElement('script')
+      a.src = './app.js'
+      a.onerror = function () { window.__stageFail('app') }
+      document.head.appendChild(a)
+    }
+    document.head.appendChild(s)
+  })()
+</script>
+<script>
+  // 带 ?reset=1 打开时清掉旧缓存和 Service Worker，再回到干净入口
+  if (new URLSearchParams(location.search).has('reset') && 'caches' in window) {
+    caches.keys().then(function (keys) {
+      return Promise.all(keys.map(function (key) { return caches.delete(key) }))
+    }).then(function () {
+      return navigator.serviceWorker ? navigator.serviceWorker.getRegistrations() : []
+    }).then(function (regs) {
+      return Promise.all(regs.map(function (reg) { return reg.unregister() }))
+    }).then(function () {
+      location.href = '/'
+    })
+  } else if ('serviceWorker' in navigator) {
+    var hadController = !!navigator.serviceWorker.controller
+    navigator.serviceWorker.register('/service-worker.js').then(function () {
+      var reloading = false
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (!hadController || reloading) return
+        reloading = true
+        location.reload()
+      })
+    }).catch(function () {})
+  }
+</script>
+</body>
+</html>

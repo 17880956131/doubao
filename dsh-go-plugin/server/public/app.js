@@ -840,7 +840,7 @@ async function sendChatText(text) {
       body: JSON.stringify({
         content: message,
         lang: state.lang,
-        session: 'stage',
+        session: 'main',
         state: loopState(),
       }),
     })

@@ -12,10 +12,10 @@ const BASE = 'http://127.0.0.1:8100'
 const PLUGIN_DIR = dirname(dirname(fileURLToPath(import.meta.url)))
 const CANDIDATES = [
   process.env.DOUBAO_HOME,
-  join(PLUGIN_DIR, 'server'),
   join(homedir(), 'workspace', 'digital-human'),
-  join(homedir(), 'doubao'),
   '/root/workspace/digital-human',
+  join(homedir(), 'doubao'),
+  join(PLUGIN_DIR, 'server'),
 ].filter(Boolean)
 const SERVER_DIR = CANDIDATES.find((dir) => existsSync(join(dir, 'server.py'))) || null
 const DEFAULT_INTERVALS = { strip_refresh_ms: 20000, status_refresh_ms: 15000, three_refresh_ms: 30000 }
