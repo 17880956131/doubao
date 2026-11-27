@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const name = 'local-doubao'
+export const name = 'zhiming-dsh-go'
 
 const BASE = 'http://127.0.0.1:8100'
 const PLUGIN_DIR = dirname(dirname(fileURLToPath(import.meta.url)))

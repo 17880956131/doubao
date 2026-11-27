@@ -1,5 +1,5 @@
 {
-  "name": "doubao-digital-human",
+  "name": "zhiming-dsh-go",
   "version": "0.1.0",
   "type": "module",
   "main": "lib/index.js",
@@ -14,8 +14,8 @@
   "dshGo": {
     "v": 1,
     "title": {
-      "zh": "豆宝",
-      "en": "Doubao"
+      "zh": "智命",
+      "en": "ZhiMing"
     },
     "icon": "robot",
     "wants": [],
@@ -98,7 +98,7 @@
       ]
     }
   },
-  "description": "豆宝：手机本地数字人，dsh-go 原生插件（自带服务与自动启动）",
+  "description": "智命（ZhiMing）：手机本地数字人生命模拟的 dsh-go 插件，角色仍是豆宝",
   "license": "MIT",
   "files": [
     "lib",

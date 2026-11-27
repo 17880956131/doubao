@@ -1,4 +1,4 @@
 - insert:
-    - id: doubao-bridge
-      name: doubao-bridge
+    - id: zhiming-bridge
+      name: zhiming-bridge
       config: {}

@@ -1,4 +1,4 @@
-export const name = 'doubao-bridge'
+export const name = 'zhiming-bridge'
 export const inject = ['tools']
 
 const DEFAULT_BASE = 'http://127.0.0.1:8100'
@@ -16,8 +16,8 @@ async function call(path, body, timeout = 30000) {
 
 export function apply(ctx) {
   ctx.effect(() => ctx.tools.register({
-    name: 'doubao_chat',
-    description: '和本地数字人豆宝说话（她有自己的记忆、情绪和表情）。返回她的回复、表情和动作。',
+    name: 'zhiming_chat',
+    description: '和智命（ZhiMing）里的数字人豆宝说话：她有自己的记忆、情绪和表情。返回她的回复、表情和动作。',
     parameters: {
       type: 'object',
       properties: {
@@ -49,5 +49,5 @@ export function apply(ctx) {
       })
       return { text: String(reply.text || ''), expression: String(reply.expression || 'neutral'), gesture: String(reply.gesture || '') }
     },
-  }), 'doubao-bridge tool')
+  }), 'zhiming-bridge tool')
 }

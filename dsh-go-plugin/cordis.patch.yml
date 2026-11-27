@@ -1,4 +1,4 @@
 # id: any unique id; name: must equal "name" in package.json.
 - insert:
-    - id: local-doubao
-      name: local-doubao
+    - id: zhiming-dsh-go
+      name: zhiming-dsh-go

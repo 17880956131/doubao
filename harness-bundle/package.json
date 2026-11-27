@@ -1,14 +1,25 @@
 {
-  "name": "doubao-bridge",
+  "name": "zhiming-bridge",
   "version": "0.1.0",
-  "description": "Bridge tool for the local Doubao digital-human server.",
+  "description": "智命（ZhiMing）与本地数字人豆宝对话的 Harness 桥接工具",
   "type": "module",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
-  "files": ["index.js", "cordis.patch.yml", "locale/*.json", "icon.svg"],
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
-  "engines": { "dsh": ">=0.2.1-rc.2 <0.3.0-0" }
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  }
 }
