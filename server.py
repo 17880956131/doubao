@@ -3783,9 +3783,19 @@ def consolidate_layers(force=False, min_override=None, kind="consolidation"):
         if len(rows) < min_needed:
             return {"ok": False, "reason": "新数据还不够训练一层",
                     "samples": len(rows), "min_samples": min_needed}
-        record = layers.add_consolidation_layer(rows, weight=strata.weight_at(time.time()),
-                                                kind=kind,
-                                                min_samples=min_needed)
+        record = None
+        layer_kind = kind
+        if kind == "consolidation" and len(rows) >= 80:
+            residual = layers.add_residual_layer(rows[-240:],
+                                                 weight=max(1.0, strata.weight_at(time.time()) * 2),
+                                                 label="残差层 " + time.strftime("%H:%M:%S"))
+            if residual.get("ok"):
+                record = residual["layer"]
+                layer_kind = "residual"
+        if record is None:
+            record = layers.add_consolidation_layer(rows, weight=strata.weight_at(time.time()),
+                                                    kind=kind,
+                                                    min_samples=min_needed)
         if record is None:
             return {"ok": False, "reason": "训练失败"}
         duration_ms = int((time.time() - started) * 1000)
@@ -3797,7 +3807,8 @@ def consolidate_layers(force=False, min_override=None, kind="consolidation"):
             _loop_state["threshold"], detail = recommended_threshold()
             _loop_state["policy"] = detail
         save_loop_state()
-        log_event("consolidate", {"layer": record["label"], "samples": record["samples"],
+        log_event("consolidate", {"layer": record["label"], "kind": layer_kind,
+                                  "samples": record["samples"],
                                   "acc": record["accuracy_expression"], "ms": duration_ms,
                                   "next_threshold": _loop_state["threshold"]})
         try:
