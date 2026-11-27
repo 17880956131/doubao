@@ -18,6 +18,8 @@ import queue
 import threading
 import time
 import wave
+import shutil
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -549,6 +551,178 @@ MIRROR_INBOX = DATA / "mirror_inbox.jsonl"
 SHADOW_STATE = DATA / "shadow_state.json"
 OBSERVATION = DATA / "observation.json"
 MM_DIR = DATA / "media"
+SYSTEM_EVENTS = DATA / "system_events.jsonl"
+SYSTEM_DIGEST = DATA / "system_digest.json"
+
+
+def system_ingest(kind, text, source="client", payload=None):
+    entry = {"ts": time.time(), "kind": str(kind)[:40], "text": str(text)[:300],
+             "source": str(source)[:40], "data": payload or {}}
+    try:
+        with open(SYSTEM_EVENTS, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    try:
+        publish({"type": "system", "kind": entry["kind"], "text": entry["text"]})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        organs.observe({"kind": "system", "text": entry["text"], "intensity": 0.3})
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "event": entry}
+
+
+def load_system_events(limit=40):
+    events = []
+    try:
+        with open(SYSTEM_EVENTS, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        return []
+    return events[-limit:]
+
+
+def probe_linux_system():
+    """不依赖 ADB：从 /proc 与 /sys 读容器可见的负载、内存、温度。"""
+    results = []
+    try:
+        with open("/proc/loadavg", "r", encoding="utf-8") as handle:
+            load1 = handle.read().split()[0]
+        results.append(system_ingest("cpu", "系统负载 " + load1, "kernel"))
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            info = {}
+            for line in handle:
+                key, _, rest = line.partition(":")
+                info[key] = rest.strip()
+            available_mb = int(info.get("MemAvailable", "0").split()[0]) // 1024
+        results.append(system_ingest("memory", "可用内存 %d MB" % available_mb, "kernel"))
+    except (OSError, ValueError, KeyError):
+        pass
+    temps = []
+    try:
+        import glob as _glob
+        for path in _glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    temps.append(int(handle.read().strip()) / 1000.0)
+            except (OSError, ValueError):
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    if temps:
+        results.append(system_ingest("thermal", "机身温度 %.1f℃" % max(temps), "kernel"))
+    return {"ok": True, "probes": len(results)}
+
+
+def probe_adb_system():
+    """可选：通过 adb 读前台应用与通知（只读）；没连上就安静跳过。"""
+    results = []
+    try:
+        adb = shutil.which("adb")
+    except Exception:  # noqa: BLE001
+        adb = None
+    if not adb:
+        return {"ok": False, "reason": "没有 adb"}
+    try:
+        device = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=8)
+        if "device" not in (device.stdout or ""):
+            return {"ok": False, "reason": "ADB 未连接", "detail": (device.stderr or "")[:80]}
+    except Exception as error:  # noqa: BLE001
+        return {"ok": False, "reason": "ADB 不可用：" + str(error)[:60]}
+    try:
+        dump = subprocess.run([adb, "shell", "dumpsys", "activity", "activities"],
+                              capture_output=True, text=True, timeout=10)
+        text = dump.stdout or ""
+        import re as _re
+        match = _re.search(r"(?:mResumedActivity|topResumedActivity)[^\n]*?([a-zA-Z0-9_.]+)/", text)
+        if match:
+            results.append(system_ingest("foreground", "前台应用 " + match.group(1), "adb"))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        dump = subprocess.run([adb, "shell", "dumpsys", "notification", "--noredact"],
+                              capture_output=True, text=True, timeout=15)
+        text = dump.stdout or ""
+        records = text.count("NotificationRecord(")
+        if records:
+            results.append(system_ingest("notification", "通知栏有 %d 条通知" % records, "adb"))
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "probes": len(results)}
+
+
+def system_digest(force=False):
+    """本地模型循环：把最近的系统事件压成一句话，写进情绪和记忆。"""
+    try:
+        with open(SYSTEM_DIGEST, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        state = {"last_ts": 0.0}
+    events = [event for event in load_system_events(60) if float(event.get("ts") or 0) > float(state.get("last_ts") or 0)]
+    events = events[-12:]
+    if not events and not force:
+        return {"ok": False, "reason": "没有新的系统事件"}
+    lines = ["%s：%s" % (event.get("kind"), event.get("text")) for event in events][-10:]
+    prompt = "以下是手机系统事件：\n" + "\n".join(lines) + "\n用一句中文总结她此刻该知道什么，不超过40字，不要解释。"
+    summary = ""
+    raw = ""
+    try:
+        if local_brain_ok():
+            raw = openai_chat("http://127.0.0.1:8181/v1", "", "qwen3-0.6b", prompt, [], "zh",
+                              system="你是一个安静的观察者，用一句中文总结系统状态。")
+    except Exception as error:  # noqa: BLE001
+        log_event("system-digest-error", str(error)[:120])
+    summary = ""
+    text_raw = str(raw or "").strip()
+    if text_raw:
+        data = None
+        try:
+            data = json.loads(text_raw)
+        except ValueError:
+            try:
+                import ast as _ast
+                data = _ast.literal_eval(text_raw)
+            except (ValueError, SyntaxError):
+                data = None
+        if isinstance(data, dict):
+            summary = str(data.get("reply") or data.get("text") or data.get("summary")
+                          or data.get("state") or data.get("advice") or "")
+        else:
+            summary = text_raw
+    summary = summary.strip().strip("{}").strip()[:80]
+    if not summary:
+        summary = "系统状态：" + "；".join("%s=%s" % (event.get("kind"), event.get("text")) for event in events[-3:])[:60]
+    try:
+        mood.apply("chat", summary)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        memory.add("system", "系统观察：" + summary, importance=0.3)
+    except Exception:  # noqa: BLE001
+        pass
+    state["last_ts"] = max([float(event.get("ts") or 0) for event in events] or [time.time()])
+    state["summary"] = summary
+    state["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(SYSTEM_DIGEST, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False)
+    except OSError:
+        pass
+    log_event("system-digest", {"events": len(events), "summary": summary})
+    return {"ok": True, "events": len(events), "summary": summary,
+            "source": "local" if local_brain_ok() else "rule"}
 OBSERVATION_LOG = DATA / "observation_daily.jsonl"
 AUTO_OBS = DATA / "observation_auto.json"
 STABLE_HOURS = 24
@@ -775,6 +949,48 @@ def orchestrate(payload):
             "gesture": gesture, "mood": mood.snapshot(), "source": source,
             "latency_ms": latency, "memory_written": memory_written,
             "arbitration": arbitration}
+
+
+def body_say(text, expression=None, source="agent"):
+    """单主体 A：语言只来自 Agent；这里只让身体按这句话表达。"""
+    text = str(text or "").strip()
+    if not text:
+        return {"ok": False, "reason": "没有文字"}
+    state = dict(_presence) if isinstance(_presence, dict) else {}
+    current_expression = state.get("expression") or "neutral"
+    current_gesture = state.get("gesture") or ""
+    params = state.get("params") or {}
+    mood_label = mood.snapshot().get("label")
+    prediction = None
+    try:
+        prediction = layers.predict(current_expression, current_gesture, False, params,
+                                    mood_label, text=text)
+    except Exception:  # noqa: BLE001
+        prediction = None
+    final_expression = expression or (prediction or {}).get("expression") or current_expression
+    final_gesture = (prediction or {}).get("gesture") or current_gesture
+    try:
+        save_presence({"last_event": "body-say", "expression": final_expression,
+                       "gesture": final_gesture, "mood": mood_label, "params": params})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        trajectory.add({"expression": final_expression, "gesture": final_gesture, "speaking": True,
+                        "mood": mood_label, "scene": "body-say",
+                        "params": params, "source": "agent-body", "context_text": text})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        publish({"type": "body", "kind": "say", "text": text[:160],
+                 "expression": final_expression, "gesture": final_gesture})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        memory.add("chat", "我说：" + text[:300], importance=0.25)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "text": text, "expression": final_expression,
+            "gesture": final_gesture, "mood": mood_label}
 
 
 def multimodal_ingest_image(image_base64, caption="", source="web"):
@@ -3086,6 +3302,9 @@ class Handler(BaseHTTPRequestHandler):
                 "attention": self_model.focus(),
                 "updated_at": presence.get("last_seen"),
             })
+        if path == "/api/system/recent":
+            return self._send(200, {"events": load_system_events(20),
+                                    "summary": (lambda: (json.load(open(SYSTEM_DIGEST, encoding="utf-8")).get("summary") if SYSTEM_DIGEST.exists() else None))()})
         if path == "/api/session/main":
             with _orch_lock:
                 sessions = load_orch_history()
@@ -3879,6 +4098,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, multimodal_ingest_audio(
                 body.get("audio_base64") or body.get("audio") or "",
                 str(body.get("lang") or "zh"), str(body.get("source") or "web")))
+        if path == "/api/system/recent":
+            return self._send(200, {"events": load_system_events(20),
+                                    "summary": (lambda: (json.load(open(SYSTEM_DIGEST, encoding="utf-8")).get("summary") if SYSTEM_DIGEST.exists() else None))()})
         if path == "/api/session/main":
             with _orch_lock:
                 sessions = load_orch_history()
@@ -3897,6 +4119,20 @@ class Handler(BaseHTTPRequestHandler):
                                     "stable_hours": round(stable_hours, 2),
                                     "required_hours": STABLE_HOURS,
                                     "fingerprint": state.get("fingerprint")[:12]})
+        if path == "/api/body/say":
+            return self._send(200, body_say(body.get("text") or body.get("content") or "",
+                                            body.get("expression") or None,
+                                            str(body.get("source") or "agent")))
+        if path == "/api/system/ingest":
+            return self._send(200, system_ingest(body.get("kind") or "unknown",
+                                                 body.get("text") or "", body.get("source") or "client",
+                                                 body.get("data")))
+        if path == "/api/system/probe-adb":
+            return self._send(200, probe_adb_system())
+        if path == "/api/system/probe":
+            return self._send(200, probe_linux_system())
+        if path == "/api/system/digest":
+            return self._send(200, system_digest(force=bool(body.get("force"))))
         if path == "/api/observation/start":
             return self._send(200, observation_start(int(body.get("days") or 7)))
         if path == "/api/observation/stop":
@@ -4643,6 +4879,19 @@ def background_loop():
                     maybe_auto_volcano()
             except Exception as error:  # noqa: BLE001
                 log_event("thermal-error", str(error)[:150])
+            if tunables.get("system_adb_enabled"):
+                try:
+                    probe_adb_system()
+                except Exception as error:  # noqa: BLE001
+                    log_event("system-probe-adb-error", str(error)[:120])
+            try:
+                probe_linux_system()
+            except Exception as error:  # noqa: BLE001
+                log_event("system-probe-error", str(error)[:120])
+            try:
+                system_digest()
+            except Exception as error:  # noqa: BLE001
+                log_event("system-digest-error", str(error)[:120])
             try:
                 if not observation_active():
                     maybe_auto_observation()

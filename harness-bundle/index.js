@@ -16,15 +16,14 @@ async function call(path, body, timeout = 30000) {
 
 export function apply(ctx) {
   ctx.effect(() => ctx.tools.register({
-    name: 'zhiming_chat',
-    description: '和智命（ZhiMing）里的数字人豆宝说话：她有自己的记忆、情绪和表情。返回她的回复、表情和动作。',
+    name: 'zhiming_body',
+    description: '让智命的身体按 Agent 的话做表情和动作，并驱动舞台；不生成新的对话（单主体：说话的是 Agent，她是身体）。',
     parameters: {
       type: 'object',
       properties: {
-        message: { type: 'string', description: '要对豆宝说的话' },
-        lang: { type: 'string', description: '语言 zh/ja/en，默认 zh' },
+        text: { type: 'string', description: '要让身体表达的话（由 Agent 说，不是她生成）' },
       },
-      required: ['message'],
+      required: ['text'],
       additionalProperties: false,
     },
     output: {
@@ -34,6 +33,7 @@ export function apply(ctx) {
           text: { type: 'string' },
           expression: { type: 'string' },
           gesture: { type: 'string' },
+          mood: { type: 'string' },
         },
       },
       render: (args, value) => [{
@@ -42,12 +42,12 @@ export function apply(ctx) {
       }],
     },
     async execute(args) {
-      const reply = await call('/api/orchestrate', {
-        content: String(args.message || ''),
-        lang: String(args.lang || 'zh'),
-        session: 'main',
+      const body = await call('/api/body/say', {
+        text: String(args.text || ''),
+        source: 'harness-agent',
       })
-      return { text: String(reply.text || ''), expression: String(reply.expression || 'neutral'), gesture: String(reply.gesture || '') }
+      return { text: String(body.text || ''), expression: String(body.expression || 'neutral'),
+               gesture: String(body.gesture || ''), mood: String(body.mood || '') }
     },
   }), 'zhiming-bridge tool')
 }

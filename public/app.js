@@ -151,7 +151,13 @@ async function mirrorLoop() {
       if (!text) continue
       addBubble(msg.role === 'user' ? '你' : '豆宝', text)
       if (msg.role === 'assistant' && text.length <= 160 && !state.speaking) {
-        try { await speak(text, 'neutral') } catch (err) { /* 忽略 */ }
+        try {
+          const body = await fetch('/api/body/say', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, source: 'mirror' }),
+          }).then((res) => res.json()).catch(() => null)
+          await speak(text, (body && body.expression) || 'neutral')
+        } catch (err) { /* 忽略 */ }
       }
     }
   } catch (err) { /* 忽略 */ }
@@ -811,8 +817,8 @@ $('mm-camera').addEventListener('click', async () => {
 
 async function sendChatText(text) {
   lastUserText = text
-  if (state.stageOnly) {
-    addBubble('系统', '演出模式：这边只负责演。说话请到 DSH 会话里说，舞台会自动同步。')
+  if (true) {
+    addBubble('系统', '单主体模式：说话只在 DSH 会话里进行，舞台只负责演。')
     return
   }
   if (state.outbox) {
@@ -1317,3 +1323,29 @@ async function restorePresence() {
     log('model-error', String(err && err.stack || err))
   }
 })()
+
+// ── 手机系统数据上报（浏览器可见部分）─────────────────
+async function reportSystem(kind, text) {
+  try {
+    await fetch('/api/system/ingest', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, text, source: 'stage-page' }),
+    })
+  } catch (err) { /* 忽略 */ }
+}
+
+async function systemTick() {
+  try {
+    const online = navigator.onLine
+    await reportSystem('network', online ? '网络在线' : '网络断开')
+    if (navigator.getBattery) {
+      const battery = await navigator.getBattery()
+      await reportSystem('battery', `电量 ${Math.round(battery.level * 100)}%，${battery.charging ? '充电中' : '未充电'}`)
+    }
+    await reportSystem('visibility', document.visibilityState === 'visible' ? '页面在前台' : '页面在后台')
+  } catch (err) { /* 忽略 */ }
+}
+setTimeout(systemTick, 8000)
+setInterval(systemTick, 60000)
+window.addEventListener('online', () => reportSystem('network', '网络恢复'))
+window.addEventListener('offline', () => reportSystem('network', '网络断开'))

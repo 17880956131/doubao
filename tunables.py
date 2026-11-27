@@ -38,6 +38,7 @@ DEFAULTS = {
     "thermal_melt_point": 0.85,
     "thermal_solid_point": 0.35,
     "layer_transmission": 0.15,
+    "system_adb_enabled": False,
     "settle_w_credit": 0.15,
     "credit_low_threshold": 0.3,
 }
