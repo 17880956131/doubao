@@ -1498,6 +1498,41 @@ def planet_section(rows):
     }
 
 
+def record_action(action_type, text, meta=None):
+    """动作轨迹：状态→动作→结果，供以后学"什么时候该做什么"。"""
+    text = str(text or "").strip()
+    if not text:
+        return None
+    presence_now = dict(_presence) if isinstance(_presence, dict) else {}
+    snapshot = {
+        "expression": presence_now.get("expression") or "neutral",
+        "gesture": presence_now.get("gesture") or "",
+        "speaking": False,
+        "mood": mood.snapshot().get("label") or "平静",
+        "scene": "action",
+        "params": presence_now.get("params") or {},
+        "source": "action",
+        "context_text": text[:300],
+        "action_type": action_type,
+        "action_meta": meta or {},
+    }
+    try:
+        trajectory.add(snapshot)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        memory.add("action", "我" + ("搜索" if action_type == "search" else "读过") + "：" + text[:200],
+                   importance=0.3, source="action", session="reading", person="owner")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        publish({"type": "action", "action": action_type, "text": text[:120]})
+    except Exception:  # noqa: BLE001
+        pass
+    log_event("action", {"type": action_type, "text": text[:60]})
+    return {"ok": True, "action": action_type, "text": text}
+
+
 def body_say(text, expression=None, source="agent", voice=None):
     """单主体 A：语言只来自 Agent；这里只让身体按这句话表达。"""
     text = str(text or "").strip()
@@ -4088,6 +4123,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, prune_preview(threshold))
         if path == "/api/metrics/uncertainty":
             return self._send(200, uncertainty_metrics())
+        if path == "/api/actions/recent":
+            items = []
+            try:
+                conn = sqlite3.connect(str(DATA / "trajectory.db"), timeout=5)
+                for row in conn.execute(
+                        "SELECT ts, action_type, context_text, action_meta FROM trajectories "
+                        "WHERE action_type IS NOT NULL AND action_type != 'express' ORDER BY id DESC LIMIT 30").fetchall():
+                    items.append({"ts": row[0], "action": row[1], "text": row[2],
+                                  "meta": json.loads(row[3] or "{}") if row[3] else {}})
+                conn.close()
+            except (sqlite3.Error, ValueError):
+                pass
+            counts = {}
+            for item in items:
+                counts[item["action"]] = counts.get(item["action"], 0) + 1
+            return self._send(200, {"count": len(items), "by_action": counts, "items": items[:12]})
         if path == "/api/thoughts/recent":
             items = []
             try:
@@ -5100,12 +5151,26 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
+        if path == "/api/action/search":
+            query = str(body.get("query") or "").strip()
+            if not query:
+                return self._send(200, {"ok": False, "reason": "没有查询词"})
+            return self._send(200, record_action("search", query, {"source": body.get("source") or "reading"}) or {"ok": False})
+        if path == "/api/action/read":
+            text = str(body.get("text") or "").strip()
+            if not text:
+                return self._send(200, {"ok": False, "reason": "没有内容"})
+            return self._send(200, record_action("read", text, {"url": body.get("url") or ""}) or {"ok": False})
         if path == "/api/memory/note":
             text = str(body.get("text") or "").strip()
             if not text:
                 return self._send(200, {"ok": False, "reason": "没有内容"})
             url = str(body.get("url") or "").strip()[:300]
             note = text[:600] + (("（来源：" + url + "）") if url else "")
+            try:
+                record_action("read", text[:120], {"url": url})
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 memory.add("web", "网上读到：" + note, importance=0.35,
                            source="web", session="reading", person="owner")

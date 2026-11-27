@@ -51,6 +51,7 @@ class MemoryStore:
             "joke": "generated",
             "visual": "imagined",
             "web": "web",
+            "action": "action",
         }
         return mapping.get(kind, "unknown")
 
