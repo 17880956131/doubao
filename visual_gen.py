@@ -28,11 +28,17 @@ def _gradient(width, height, top, bottom):
 def _scene(text, style, t=0.0):
     rng = random.Random(_seed(text))
     width, height = 640, 480
-    night = style in ("night", "rain") or "夜" in text or "晚" in text
-    if night:
-        image = _gradient(width, height, (18, 24, 48), (46, 38, 60))
-    else:
-        image = _gradient(width, height, (242, 196, 142), (120, 150, 190))
+    palettes = {
+        "night": ((18, 24, 48), (46, 38, 60)),
+        "rain": ((22, 30, 44), (58, 60, 74)),
+        "warm": ((255, 190, 120), (200, 110, 90)),
+        "cool": ((60, 90, 140), (150, 180, 210)),
+        "dusk": ((70, 50, 90), (180, 120, 90)),
+        "day": ((242, 196, 142), (120, 150, 190)),
+    }
+    night = style in ("night", "rain", "cool", "dusk") or "夜" in text or "晚" in text
+    top, bottom = palettes.get(style, palettes["night" if night else "day"])
+    image = _gradient(width, height, top, bottom)
     draw = ImageDraw.Draw(image, "RGBA")
 
     # 星星 / 云

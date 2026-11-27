@@ -664,15 +664,28 @@ def imagine_scene(force=False):
     visual_url = None
     try:
         import visual_gen
-        style = "night" if (hour >= 20 or hour < 6 or "夜" in text or "灯" in text) else "auto"
+        style = "auto"
+        if any(word in mood_label for word in ("开心", "高兴", "兴奋")):
+            style = "warm"
+        elif any(word in mood_label for word in ("难过", "压力", "不安")):
+            style = "cool"
+        elif any(word in mood_label for word in ("困", "累", "疲惫")):
+            style = "dusk"
+        elif hour >= 20 or hour < 6 or "夜" in text or "灯" in text:
+            style = "night"
         if "雨" in text:
             style = "rain"
         picture = visual_gen.generate(text, style=style, animate=True)
         visual_url = picture.get("url")
+        try:
+            memory.add("visual", "我给想象画的图：" + str(visual_url), importance=0.25)
+        except Exception:  # noqa: BLE001
+            pass
     except Exception as error:  # noqa: BLE001
         log_event("imagine-visual-error", str(error)[:120])
     entry = {"ts": time.time(), "text": text, "hour": hour, "mood": mood_label,
-             "expression": expression, "gesture": gesture, "visual": visual_url}
+             "expression": expression, "gesture": gesture, "visual": visual_url,
+            "visual_style": style}
     try:
         with open(IMAGINATION_LOG, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -696,7 +709,8 @@ def imagine_scene(force=False):
         pass
     log_event("imagine", {"text": text})
     return {"ok": True, "text": text, "hour": hour, "mood": mood_label,
-            "expression": expression, "gesture": gesture, "visual": visual_url}
+            "expression": expression, "gesture": gesture, "visual": visual_url,
+            "visual_style": style}
 
 
 def self_core():
@@ -5486,10 +5500,13 @@ def background_loop():
             except Exception as error:  # noqa: BLE001
                 log_event("imagine-error", str(error)[:120])
             try:
-                living_rows = layers._rows()[-3:]
+                if observation_active():
+                    living_rows = []
+                else:
+                    living_rows = layers._rows()[-3:]
                 for living_row in living_rows:
                     layers.online_step(living_row, lr=0.01)
-                living_now = layers.living_status()
+                living_now = layers.living_status() if living_rows else {"samples": 0}
                 if int(living_now.get("samples") or 0) >= int(tunables.get("living_sleep_steps") or 40):
                     body_hint = {"force": False}
                     threshold = int(tunables.get("living_sleep_steps") or 40)
