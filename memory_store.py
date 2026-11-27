@@ -50,6 +50,7 @@ class MemoryStore:
             "diary": "reflection",
             "joke": "generated",
             "visual": "imagined",
+            "web": "web",
         }
         return mapping.get(kind, "unknown")
 

@@ -3469,7 +3469,9 @@ def memory_context(message):
             continue
         source = hit.get("source")
         text = str(hit.get("text") or "")[:120]
-        if source == "imagined":
+        if source == "web":
+            lines.append("- 网上看到过：" + text)
+        elif source == "imagined":
             lines.append("- 我想象过：" + text)
         elif source == "fact":
             lines.append("- 你确认过：" + text)
@@ -5098,6 +5100,19 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
+        if path == "/api/memory/note":
+            text = str(body.get("text") or "").strip()
+            if not text:
+                return self._send(200, {"ok": False, "reason": "没有内容"})
+            url = str(body.get("url") or "").strip()[:300]
+            note = text[:600] + (("（来源：" + url + "）") if url else "")
+            try:
+                memory.add("web", "网上读到：" + note, importance=0.35,
+                           source="web", session="reading", person="owner")
+            except Exception as error:  # noqa: BLE001
+                return self._send(200, {"ok": False, "reason": str(error)[:80]})
+            log_event("memory-note", {"chars": len(text), "url": url[:80]})
+            return self._send(200, {"ok": True, "text": note})
         if path == "/api/voice/transcript":
             text = str(body.get("text") or "").strip()
             if not text:
