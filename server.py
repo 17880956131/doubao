@@ -584,8 +584,8 @@ def imagine_scene(force=False):
     last = float(state.get("last_ts") or 0)
     if not force and time.time() - last < 1800:
         return {"ok": False, "reason": "还没到下一次想象"}
-    if not local_brain_ok():
-        return {"ok": False, "reason": "本地模型不在线"}
+    if not (local_brain_ok() or account_available()):
+        return {"ok": False, "reason": "本地模型和账号都不在线"}
     hour = time.localtime().tm_hour
     mood_label = mood.snapshot().get("label") or "平静"
     presence = _presence if isinstance(_presence, dict) else {}
@@ -661,8 +661,18 @@ def imagine_scene(force=False):
                        "gesture": gesture, "mood": mood_label})
     except Exception:  # noqa: BLE001
         pass
+    visual_url = None
+    try:
+        import visual_gen
+        style = "night" if (hour >= 20 or hour < 6 or "夜" in text or "灯" in text) else "auto"
+        if "雨" in text:
+            style = "rain"
+        picture = visual_gen.generate(text, style=style, animate=True)
+        visual_url = picture.get("url")
+    except Exception as error:  # noqa: BLE001
+        log_event("imagine-visual-error", str(error)[:120])
     entry = {"ts": time.time(), "text": text, "hour": hour, "mood": mood_label,
-             "expression": expression, "gesture": gesture}
+             "expression": expression, "gesture": gesture, "visual": visual_url}
     try:
         with open(IMAGINATION_LOG, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -674,7 +684,7 @@ def imagine_scene(force=False):
         pass
     try:
         publish({"type": "imagination", "text": text, "expression": expression,
-                 "gesture": gesture})
+                 "gesture": gesture, "visual": visual_url})
     except Exception:  # noqa: BLE001
         pass
     state["last_ts"] = time.time()
@@ -685,7 +695,8 @@ def imagine_scene(force=False):
     except OSError:
         pass
     log_event("imagine", {"text": text})
-    return {"ok": True, "text": text, "hour": hour, "mood": mood_label}
+    return {"ok": True, "text": text, "hour": hour, "mood": mood_label,
+            "expression": expression, "gesture": gesture, "visual": visual_url}
 
 
 def self_core():
@@ -3747,6 +3758,13 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
             return self._send(200, {"items": recent[-10:]})
+        if path.startswith("/media/"):
+            name = path.split("/media/", 1)[1]
+            target = (MM_DIR / name).resolve()
+            if not str(target).startswith(str(MM_DIR.resolve())) or not target.is_file():
+                return self._send(404, "not found", "text/plain; charset=utf-8")
+            content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+            return self._send(200, target.read_bytes(), content_type)
         if path == "/api/strata/eras":
             groups = {}
             for bucket, meta in layers.meta.items():
@@ -4657,6 +4675,17 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 filled += 1
             return self._send(200, {"ok": True, "filled": filled})
+        if path == "/api/visual/generate":
+            import visual_gen
+            result = visual_gen.generate(str(body.get("text") or ""),
+                                         str(body.get("style") or "auto"),
+                                         bool(body.get("animate")))
+            try:
+                publish({"type": "visual", "text": str(body.get("text") or "")[:80],
+                         "url": result.get("url"), "kind": result.get("kind")})
+            except Exception:  # noqa: BLE001
+                pass
+            return self._send(200, result)
         if path == "/api/living/sleep":
             threshold = int(tunables.get("living_sleep_steps") or 40)
             status = layers.living_status()

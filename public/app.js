@@ -960,10 +960,27 @@ function setupPerception() {
       const data = await response.json()
       eventSeq = typeof data.seq === 'number' ? data.seq : eventSeq
       for (const event of data.events || []) {
+        if (event.type === 'visual' && event.url) {
+          const img = $('visual-overlay')
+          if (img) {
+            img.src = event.url
+            img.style.display = 'block'
+            setTimeout(() => { img.style.display = 'none' }, 9000)
+          }
+          addBubble('豆宝（画面）', event.text || '（生成了一张画面）')
+        }
         if (event.type === 'imagination' && event.text) {
           addBubble('豆宝（想象）', event.text)
           if (event.expression) setExpression(event.expression)
           if (event.gesture) startGesture(event.gesture)
+          if (event.visual) {
+            const img = $('visual-overlay')
+            if (img) {
+              img.src = event.visual
+              img.style.display = 'block'
+              setTimeout(() => { img.style.display = 'none' }, 11000)
+            }
+          }
         }
         reactScene(event.type || 'external', event)
       }
