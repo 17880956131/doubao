@@ -1145,7 +1145,7 @@ def orchestrate(payload):
         history = sessions.get(session) or []
     memory_written = False
     try:
-        memory.add("chat", "用户：" + content[:400], importance=0.3)
+        memory.add("chat", "用户：" + content[:400], importance=0.3, session=session)
         memory_written = True
     except Exception:  # noqa: BLE001
         pass
@@ -1471,7 +1471,7 @@ def body_say(text, expression=None, source="agent", voice=None):
     except Exception:  # noqa: BLE001
         pass
     try:
-        memory.add("chat", "我说：" + text[:300], importance=0.25)
+        memory.add("chat", "我说：" + text[:300], importance=0.25, session="agent")
     except Exception:  # noqa: BLE001
         pass
     return {"ok": True, "text": text, "expression": final_expression,
@@ -3946,6 +3946,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/system/recent":
             return self._send(200, {"events": load_system_events(20),
                                     "summary": (lambda: (json.load(open(SYSTEM_DIGEST, encoding="utf-8")).get("summary") if SYSTEM_DIGEST.exists() else None))()})
+        if path == "/api/memory/pool":
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            session = (query.get("session", [""])[0] or "").strip() or None
+            q = (query.get("q", [""])[0] or "").strip()
+            result = {"sessions": memory.pool_stats(), "session": session}
+            if q:
+                result["hits"] = memory.search(q, k=8, with_source=True, session=session)
+            return self._send(200, result)
         if path == "/api/memory/provenance":
             return self._send(200, {"by_source": memory.source_stats(),
                                     "note": "imagined 是想象，检索默认不当作事实"})

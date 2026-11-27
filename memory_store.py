@@ -27,6 +27,9 @@ class MemoryStore:
         if "source" not in columns:
             self.conn.execute("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'perception'")
             self.conn.commit()
+        if "session" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN session TEXT DEFAULT 'shared'")
+            self.conn.commit()
         self.conn.commit()
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_ts ON memories(ts)")
         self.conn.commit()
@@ -63,7 +66,7 @@ class MemoryStore:
             self.cache.clear()
         return blob
 
-    def add(self, kind, text, importance=0.35, source=None):
+    def add(self, kind, text, importance=0.35, source=None, session="shared"):
         text = str(text).strip()[:1000]
         if not text:
             return False
@@ -71,39 +74,46 @@ class MemoryStore:
         source = source or self.infer_source(kind)
         with self.lock:
             self.conn.execute(
-                "INSERT INTO memories (ts,kind,text,importance,embedding,last_used,hits,source) VALUES (?,?,?,?,?,?,0,?)",
-                (time.time(), kind, text, float(importance), blob, time.time(), source),
+                "INSERT INTO memories (ts,kind,text,importance,embedding,last_used,hits,source,session) VALUES (?,?,?,?,?,?,0,?,?)",
+                (time.time(), kind, text, float(importance), blob, time.time(), source, str(session or "shared")[:40]),
             )
             self.conn.commit()
         return blob is not None
 
-    def search(self, query, k=4, min_score=0.3, include_imagined=False, with_source=False):
+    def search(self, query, k=4, min_score=0.3, include_imagined=False, with_source=False, session=None):
         blob = self._embed(query)
         if blob is None:
             return []
         query_vec = struct.unpack(f"<{EMBED_DIMS}f", blob)
         rows = self.conn.execute(
-            "SELECT id,kind,text,importance,embedding,source FROM memories WHERE embedding IS NOT NULL ORDER BY id DESC LIMIT 400"
+            "SELECT id,kind,text,importance,embedding,source,session FROM memories WHERE embedding IS NOT NULL ORDER BY id DESC LIMIT 400"
         ).fetchall()
         scored = []
-        for rid, kind, text, importance, embedding, source in rows:
+        for rid, kind, text, importance, embedding, source, mem_session in rows:
             if not embedding or len(embedding) != EMBED_DIMS * 4:
+                continue
+            if session and (mem_session or "shared") != session:
                 continue
             if not include_imagined and (source or "unknown") == "imagined":
                 continue
             vec = struct.unpack(f"<{EMBED_DIMS}f", embedding)
             score = sum(a * b for a, b in zip(query_vec, vec)) + (importance or 0) * 0.05
-            scored.append((score, rid, kind, text, source))
+            scored.append((score, rid, kind, text, source, mem_session))
         scored.sort(reverse=True)
         hits = [item for item in scored[:k] if item[0] >= min_score]
         with self.lock:
-            for _, rid, _, _, _ in hits:
+            for _, rid, _, _, _, _ in hits:
                 self.conn.execute("UPDATE memories SET last_used=?, hits=hits+1 WHERE id=?", (time.time(), rid))
             self.conn.commit()
         if with_source:
-            return [{"kind": kind, "text": text, "source": source or "unknown"}
-                    for _, _, kind, text, source in hits]
-        return [(kind, text) for _, _, kind, text, _ in hits]
+            return [{"kind": kind, "text": text, "source": source or "unknown",
+                     "session": mem_session or "shared"}
+                    for _, _, kind, text, source, mem_session in hits]
+        return [(kind, text) for _, _, kind, text, _, _ in hits]
+
+    def pool_stats(self):
+        rows = self.conn.execute("SELECT COALESCE(session,'shared'), COUNT(*) FROM memories GROUP BY session").fetchall()
+        return {str(session): int(count) for session, count in rows}
 
     def source_stats(self):
         rows = self.conn.execute("SELECT COALESCE(source,'unknown'), COUNT(*) FROM memories GROUP BY source").fetchall()
