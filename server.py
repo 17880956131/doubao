@@ -605,20 +605,78 @@ def curiosity_predict(entity, guess=None, session="main"):
                               "用一个短句猜一猜：%s 是什么？只说猜测，不超过30字。" % entity,
                               [], "zh", system=self_core_text() + "\n只输出一句猜测，不要解释。", timeout=60)
             parsed = parse_reply(raw)
-            guess = str(parsed.get("text") or "").strip()[:200]
+            guess = str(parsed.get("text") or "").strip()
+            if guess.startswith("{") and '"reply"' in guess:
+                import re as _re
+                match = _re.search(r'"reply"\s*:\s*"([^"]*)"', guess)
+                if match:
+                    guess = match.group(1)
+            guess = guess[:200]
         except Exception as error:  # noqa: BLE001
             return {"ok": False, "reason": "猜测失败：" + str(error)[:80]}
     if not guess:
         return {"ok": False, "reason": "猜不出来"}
+    # 多器官：语言头猜测 + 记忆先验 + 置信层 + 行为层表情
+    import struct
+    memory_prior = []
+    try:
+        memory_prior = memory.search(entity, k=3, with_source=True)
+    except Exception:  # noqa: BLE001
+        memory_prior = []
+    confidence = None
+    try:
+        import knowledge
+        if memory_prior:
+            prior_text = str(memory_prior[0].get("text") or "")
+            cosine = 0.0
+            try:
+                a_blob = memory._embed(guess)
+                b_blob = memory._embed(prior_text)
+                if a_blob and b_blob:
+                    a = struct.unpack("<768f", a_blob)
+                    b = struct.unpack("<768f", b_blob)
+                    cosine = round(max(0.0, min(1.0, sum(x * y for x, y in zip(a, b)))), 3)
+            except Exception:  # noqa: BLE001
+                pass
+            confidence = knowledge.confidence_for({"guess": guess, "fact": prior_text,
+                                                    "cosine": cosine,
+                                                    "verdict": "部分一致" if cosine >= 0.45 else "幻觉",
+                                                    "reward": 1 if cosine >= 0.7 else -1})
+    except Exception:  # noqa: BLE001
+        confidence = None
+    expression = None
+    gesture = None
+    try:
+        presence_now = dict(_presence) if isinstance(_presence, dict) else {}
+        prediction = layers.predict(presence_now.get("expression") or "neutral",
+                                    presence_now.get("gesture") or "", False, {},
+                                    mood.snapshot().get("label"), text=entity)
+        if prediction:
+            expression = prediction.get("expression")
+            gesture = prediction.get("gesture")
+    except Exception:  # noqa: BLE001
+        pass
+    lead = "语言头"
+    if memory_prior and (confidence or 0) >= 0.6:
+        lead = "记忆"
+    elif confidence is not None and confidence < 0.35:
+        lead = "语言头（低置信）"
     item = {"ts": time.time(), "entity": entity, "guess": guess, "source": source,
-            "session": session, "status": "pending"}
+            "session": session, "status": "pending",
+            "memory_prior": [{"text": str(hit.get("text") or "")[:120], "source": hit.get("source")}
+                             for hit in memory_prior],
+            "confidence": confidence, "expression": expression, "gesture": gesture,
+            "lead": lead}
     _append_jsonl(PREDICTIONS, item)
     try:
         memory.add("guess", "我猜：" + entity + "：" + guess, importance=0.25,
                    source="imagined", session="reading", person="owner")
     except Exception:  # noqa: BLE001
         pass
-    return {"ok": True, "entity": entity, "guess": guess, "source": source}
+    return {"ok": True, "entity": entity, "guess": guess, "source": source,
+            "memory_prior": [str(hit.get("text") or "")[:120] for hit in memory_prior],
+            "confidence": confidence, "expression": expression, "gesture": gesture,
+            "lead": lead}
 
 
 def compare_prediction(entity, fact_text):
