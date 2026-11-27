@@ -557,6 +557,23 @@ OBSERVATION = DATA / "observation.json"
 MM_DIR = DATA / "media"
 SYSTEM_EVENTS = DATA / "system_events.jsonl"
 SELF_CORE = DATA / "self_core.json"
+SOCIAL = DATA / "social.json"
+
+
+def social_state():
+    try:
+        with open(SOCIAL, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {"persons": {}}
+
+
+def save_social(state):
+    try:
+        with open(SOCIAL, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
 IMAGINATION_LOG = DATA / "imagination.jsonl"
 THOUGHT_LOG = DATA / "thought_trace.jsonl"
 
@@ -1140,12 +1157,15 @@ def orchestrate(payload):
         return {"ok": False, "reason": "没有可用输入"}
     state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
     session = str(payload.get("session") or "main")[:40]
+    speaker = str(payload.get("speaker") or "owner")[:40]
+    audience = str(payload.get("audience") or "private")[:20]
     with _orch_lock:
         sessions = load_orch_history()
         history = sessions.get(session) or []
     memory_written = False
     try:
-        memory.add("chat", "用户：" + content[:400], importance=0.3, session=session)
+        memory.add("chat", "用户：" + content[:400], importance=0.3, session=session,
+                   person=speaker, audience=audience)
         memory_written = True
     except Exception:  # noqa: BLE001
         pass
@@ -3946,13 +3966,32 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/system/recent":
             return self._send(200, {"events": load_system_events(20),
                                     "summary": (lambda: (json.load(open(SYSTEM_DIGEST, encoding="utf-8")).get("summary") if SYSTEM_DIGEST.exists() else None))()})
+        if path == "/api/social":
+            return self._send(200, social_state())
+        if path == "/api/memory/history":
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            q = (query.get("q", [""])[0] or "").strip()
+            rows = []
+            try:
+                conn = sqlite3.connect(str(DATA / "memory.db"), timeout=5)
+                for rid, ts, kind, text, superseded_by, person in conn.execute(
+                        "SELECT id, ts, kind, text, superseded_by, person FROM memories "
+                        "WHERE text LIKE ? ORDER BY id DESC LIMIT 30", ("%" + q + "%",)).fetchall():
+                    rows.append({"id": rid, "ts": ts, "kind": kind, "text": text[:160],
+                                 "superseded": superseded_by is not None,
+                                 "superseded_by": superseded_by, "person": person})
+                conn.close()
+            except sqlite3.Error:
+                pass
+            return self._send(200, {"query": q, "items": rows})
         if path == "/api/memory/pool":
             query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             session = (query.get("session", [""])[0] or "").strip() or None
+            person = (query.get("person", [""])[0] or "").strip() or None
             q = (query.get("q", [""])[0] or "").strip()
-            result = {"sessions": memory.pool_stats(), "session": session}
+            result = {"sessions": memory.pool_stats(), "session": session, "person": person}
             if q:
-                result["hits"] = memory.search(q, k=8, with_source=True, session=session)
+                result["hits"] = memory.search(q, k=8, with_source=True, session=session, person=person)
             return self._send(200, result)
         if path == "/api/memory/provenance":
             return self._send(200, {"by_source": memory.source_stats(),
@@ -4980,6 +5019,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "samples": samples,
                                     "distinct": distinct,
                                     "note": "不是概率，只是多次采样的多样性"})
+        if path == "/api/social/person":
+            state = social_state()
+            name = str(body.get("name") or "").strip()[:40]
+            if not name:
+                return self._send(200, {"ok": False, "reason": "没有名字"})
+            person = state.get("persons", {}).setdefault(name, {})
+            for key in ("relation", "notes"):
+                if key in body:
+                    person[key] = str(body[key])[:120]
+            if "intimacy" in body:
+                person["intimacy"] = max(0.0, min(1.0, float(body["intimacy"])))
+            person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            save_social(state)
+            return self._send(200, {"ok": True, "person": name, "state": person})
         if path == "/api/body/say":
             return self._send(200, body_say(body.get("text") or body.get("content") or "",
                                             body.get("expression") or None,
