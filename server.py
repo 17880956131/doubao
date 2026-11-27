@@ -700,6 +700,71 @@ def compare_prediction(entity, fact_text):
     return {"ok": True, "compared": compared}
 
 
+def knowledge_validate(mode="account"):
+    """验证沉积是否有效：同一问题，无检索 vs 有检索。"""
+    use_local = str(mode).lower() == "local" and local_brain_ok()
+    import struct
+    records = _read_jsonl(HALLUCINATIONS)
+    unique = {}
+    for item in records:
+        entity = str(item.get("entity") or "").strip()
+        fact = str(item.get("fact") or "").strip()
+        if entity and fact and entity not in unique:
+            unique[entity] = fact
+    if not unique:
+        return {"ok": False, "reason": "还没有对照记录"}
+    results = []
+    for entity, fact in list(unique.items())[:5]:
+        question = entity + "是什么？"
+        baseline = ""
+        retrieved = ""
+        try:
+            if use_local:
+                baseline = openai_chat("http://127.0.0.1:8181/v1", "", "r1-1.5b", question, [], "zh",
+                                       system=self_core_text() + "\n回答一句话，不知道就说不确定。",
+                                       timeout=90)
+            else:
+                baseline = openai_chat("https://api.deepseek.com", "", "deepseek-chat", question, [], "zh",
+                                       system=self_core_text() + "\n回答一句话，不知道就说不确定。",
+                                       account=True, timeout=40)
+        except Exception:  # noqa: BLE001
+            baseline = ""
+        try:
+            hits = memory.search(entity, k=3, with_source=True)
+            context = "\n".join("- " + str(hit.get("text") or "")[:120] for hit in hits)
+            if use_local:
+                retrieved = openai_chat("http://127.0.0.1:8181/v1", "", "r1-1.5b", question, [], "zh",
+                                        system=self_core_text() + "\n已知：\n" + context
+                                        + "\n回答一句话；只使用已知内容，不足就说不确定。",
+                                        timeout=90)
+            else:
+                retrieved = openai_chat("https://api.deepseek.com", "", "deepseek-chat", question, [], "zh",
+                                        system=self_core_text() + "\n已知：\n" + context
+                                        + "\n回答一句话；只使用已知内容，不足就说不确定。",
+                                        account=True, timeout=40)
+        except Exception:  # noqa: BLE001
+            retrieved = ""
+        def score(answer):
+            try:
+                a = memory._embed(answer or "")
+                b = memory._embed(fact)
+                if a and b:
+                    va = struct.unpack("<768f", a)
+                    vb = struct.unpack("<768f", b)
+                    return round(max(0.0, min(1.0, sum(x * y for x, y in zip(va, vb)))), 3)
+            except Exception:  # noqa: BLE001
+                pass
+            return 0.0
+        results.append({"entity": entity, "baseline": baseline[:80], "retrieved": retrieved[:80],
+                        "baseline_score": score(baseline), "retrieved_score": score(retrieved)})
+    before = sum(item["baseline_score"] for item in results) / len(results)
+    after = sum(item["retrieved_score"] for item in results) / len(results)
+    return {"ok": True, "mode": "local" if use_local else "account",
+            "samples": len(results), "before": round(before, 3),
+            "after": round(after, 3), "delta": round(after - before, 3),
+            "items": results}
+
+
 def hallucination_stats():
     items = _read_jsonl(HALLUCINATIONS)
     total = len(items)
@@ -5456,6 +5521,8 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
+        if path == "/api/knowledge/validate":
+            return self._send(200, knowledge_validate(str(body.get("mode") or "account")))
         if path == "/api/knowledge/train":
             import knowledge
             return self._send(200, knowledge.train())
