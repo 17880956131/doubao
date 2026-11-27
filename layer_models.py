@@ -15,6 +15,26 @@ from policy_model import (ENCODE_FINGERPRINT, EXPRESSIONS, FEATURE_DIM, FEATURE_
 from trajectory_store import embed
 
 MIN_LAYER_SAMPLES = 8
+TEXT_DIM = 8
+_POSITIVE = ("开心", "喜欢", "谢谢", "好棒", "哈哈", "可爱", "不错", "厉害", "温暖", "陪你")
+_NEGATIVE = ("难过", "累", "烦", "讨厌", "生气", "哭", "压力", "抱歉", "可惜", "遗憾")
+_THREAT = ("删", "滚", "闭嘴", "恨", "威胁", "弄死", "走开")
+_INTIMATE = ("想你", "抱", "亲", "爱你", "陪我")
+
+
+def text_features(text):
+    """文字模态的轻量特征：8 维，拼进层输入，让权重层读到"她听到了什么"。"""
+    text = str(text or "")
+    length = min(len(text) / 80.0, 1.0)
+    question = 1.0 if ("?" in text or "？" in text) else 0.0
+    exclaim = 1.0 if ("!" in text or "！" in text) else 0.0
+    positive = min(1.0, sum(1 for word in _POSITIVE if word in text) / 2.0)
+    negative = min(1.0, sum(1 for word in _NEGATIVE if word in text) / 2.0)
+    threat = 1.0 if any(word in text for word in _THREAT) else 0.0
+    intimate = 1.0 if any(word in text for word in _INTIMATE) else 0.0
+    segments = max(0, len([part for part in text.replace("，", ",").replace("。", ",").split(",") if part.strip()]) - 1)
+    entity = min(1.0, segments / 3.0)
+    return [length, question, exclaim, positive, negative, threat, intimate, entity]
 _TUNABLES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tunables.json")
 _tunables_cache = {"mtime": 0.0, "values": {}}
 _TRANSMISSION_CACHE = {"mtime": 0.0, "value": 0.15}
@@ -137,7 +157,7 @@ class LayerModelManager:
         try:
             conn = sqlite3.connect(self.trajectory_db, timeout=5)
             rows = conn.execute(
-                "SELECT ts, expression, gesture, speaking, mood, params, next_expression, next_gesture, source "
+                "SELECT ts, expression, gesture, speaking, mood, params, next_expression, next_gesture, source, text, context_text "
                 "FROM trajectories WHERE next_expression IS NOT NULL AND next_expression != '' ORDER BY ts"
             ).fetchall()
             conn.close()
@@ -162,7 +182,8 @@ class LayerModelManager:
                 params = json.loads(params_json) if params_json else {}
             except ValueError:
                 params = {}
-            X.append(encode(expression, gesture, bool(speaking), params, mood))
+            row_text = row[10] if len(row) > 10 and isinstance(row[10], str) else ""
+            X.append(list(encode(expression, gesture, bool(speaking), params, mood)) + text_features(row_text))
             y_expr.append(EXPRESSIONS.index(next_expr) if next_expr in EXPRESSIONS else 0)
             y_gest.append(GESTURES.index(next_gest) if next_gest in GESTURES else 0)
             weight = max(0.15, float(quality)) if isinstance(quality, (int, float)) else 1.0
@@ -247,7 +268,9 @@ class LayerModelManager:
             if not other or meta.get("rejected") or meta.get("fossil"):
                 continue
             other_vec = np.asarray(other, dtype=np.float64)
-            similarity = float(unit @ (other_vec / (np.linalg.norm(other_vec) or 1.0)))
+            width = min(unit.shape[0], other_vec.shape[0])
+            other_unit = other_vec[:width] / (np.linalg.norm(other_vec[:width]) or 1.0)
+            similarity = float(unit[:width] @ other_unit)
             if similarity >= 0.97:
                 duplicate_of = meta.get("label")
                 break
@@ -408,7 +431,7 @@ class LayerModelManager:
                 bucket = int(record.get("bucket") or 0)
                 data = np.load(path[:-5] + ".npz")
                 weights = {key: data[key] for key in data.files}
-                adapted, notes = model_store.adapt_weights(weights, record, FEATURE_DIM,
+                adapted, notes = model_store.adapt_weights(weights, record, FEATURE_DIM + TEXT_DIM,
                                                            EXPRESSIONS, GESTURES)
                 if notes:
                     record["compat"] = {"migrated": True, "notes": notes,
@@ -444,12 +467,13 @@ class LayerModelManager:
                 continue
 
     # ---------- 全部层一起推理 ----------
-    def ensemble_probs(self, expression, gesture, speaking, params, mood, attention=None):
+    def ensemble_probs(self, expression, gesture, speaking, params, mood, attention=None, text=""):
         """返回各表达式/动作的概率分布，供仲裁层使用。"""
         with self.lock:
             if not self.models:
                 return None
-            x = encode(expression, gesture, speaking, params, mood).reshape(1, -1)
+            x = np.asarray(list(encode(expression, gesture, speaking, params, mood)) + text_features(text),
+                           dtype=np.float64).reshape(1, -1)
             probs_expr = np.zeros(len(EXPRESSIONS), dtype=np.float64)
             probs_gest = np.zeros(len(GESTURES), dtype=np.float64)
             total_weight = 0.0
@@ -463,15 +487,17 @@ class LayerModelManager:
             for bucket in buckets:
                 model = self.models[bucket]
                 meta = self.meta.get(bucket, {})
-                params = _ensemble_params()
+                width = int(model["w_expr"].shape[0])
+                xi = x[:, :width]
+                ensemble_params = _ensemble_params()
                 base = max(float(meta.get("adapted_weight") or meta.get("weight") or 0.1), 1e-6)
-                weight = (base ** params["weight_power"]) * (max(meta.get("samples", 1), 1) ** params["sample_power"])
+                weight = (base ** ensemble_params["weight_power"]) * (max(meta.get("samples", 1), 1) ** ensemble_params["sample_power"])
                 if attention is not None:
                     weight *= max(float(attention.get(bucket, 0.25)), 0.02)
-                logits = x @ model["w_expr"] + model["b_expr"]
+                logits = xi @ model["w_expr"] + model["b_expr"]
                 probs = np.exp(logits - logits.max())
                 probs = probs / probs.sum()
-                glog = x @ model["w_gest"] + model["b_gest"]
+                glog = xi @ model["w_gest"] + model["b_gest"]
                 gprobs = np.exp(glog - glog.max())
                 gprobs = gprobs / gprobs.sum()
                 cascade.append((bucket, probs[0], weight))
@@ -532,10 +558,12 @@ class LayerModelManager:
             for bucket, model in self.models.items():
                 if X.shape[0] == 0:
                     continue
-                logits = X @ model["w_expr"] + model["b_expr"]
+                width = int(model["w_expr"].shape[0])
+                x_eval = X[:, :width]
+                logits = x_eval @ model["w_expr"] + model["b_expr"]
                 pred = logits.argmax(axis=1)
                 accuracy = float((pred == y_expr).mean())
-                glog = X @ model["w_gest"] + model["b_gest"]
+                glog = x_eval @ model["w_gest"] + model["b_gest"]
                 gp = glog.argmax(axis=1)
                 result[bucket] = {
                     "accuracy": round(accuracy, 3),
@@ -809,8 +837,8 @@ class LayerModelManager:
             "contest_points": contest[:top],
         }
 
-    def predict(self, expression, gesture, speaking, params, mood, attention=None):
-        ensemble = self.ensemble_probs(expression, gesture, speaking, params, mood, attention=attention)
+    def predict(self, expression, gesture, speaking, params, mood, attention=None, text=""):
+        ensemble = self.ensemble_probs(expression, gesture, speaking, params, mood, attention=attention, text=text)
         if ensemble is None:
             return None
         with self.lock:

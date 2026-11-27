@@ -42,6 +42,9 @@ class TrajectoryStore:
         if "source" not in columns:
             self.conn.execute("ALTER TABLE trajectories ADD COLUMN source TEXT DEFAULT 'stage'")
             self.conn.commit()
+        if "context_text" not in columns:
+            self.conn.execute("ALTER TABLE trajectories ADD COLUMN context_text TEXT DEFAULT ''")
+            self.conn.commit()
         if "params" not in columns:
             self.conn.execute("ALTER TABLE trajectories ADD COLUMN params TEXT")
             self.conn.commit()
@@ -80,12 +83,13 @@ class TrajectoryStore:
                     (expression, gesture, previous[0]),
                 )
             self.conn.execute(
-                """INSERT INTO trajectories (ts,text,embedding,expression,gesture,speaking,mood,scene,params,source,next_expression,next_gesture)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,NULL,NULL)""",
+                """INSERT INTO trajectories (ts,text,embedding,expression,gesture,speaking,mood,scene,params,source,context_text,next_expression,next_gesture)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)""",
                 (time.time(), text, vector, expression, gesture, 1 if snapshot.get("speaking") else 0,
                  str(snapshot.get("mood") or "")[:20], str(snapshot.get("scene") or "")[:20],
                  json.dumps(snapshot.get("params") or {}, ensure_ascii=False),
-                 str(snapshot.get("source") or "stage")[:20]),
+                 str(snapshot.get("source") or "stage")[:20],
+                 str(snapshot.get("context_text") or "")[:400]),
             )
             self.conn.commit()
             count = self.conn.execute("SELECT COUNT(*) FROM trajectories").fetchone()[0]

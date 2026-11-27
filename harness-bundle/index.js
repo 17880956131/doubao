@@ -45,7 +45,7 @@ export function apply(ctx) {
       const reply = await call('/api/orchestrate', {
         content: String(args.message || ''),
         lang: String(args.lang || 'zh'),
-        session: 'harness',
+        session: 'main',
       })
       return { text: String(reply.text || ''), expression: String(reply.expression || 'neutral'), gesture: String(reply.gesture || '') }
     },

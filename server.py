@@ -550,6 +550,76 @@ SHADOW_STATE = DATA / "shadow_state.json"
 OBSERVATION = DATA / "observation.json"
 MM_DIR = DATA / "media"
 OBSERVATION_LOG = DATA / "observation_daily.jsonl"
+AUTO_OBS = DATA / "observation_auto.json"
+STABLE_HOURS = 24
+_WATCH_GLOB = ("server.py", "layer_models.py", "affect.py", "mood.py", "tunables.py",
+               "classifier.py", "memory_graph.py", "organs.py", "evolution.py",
+               "mcp-server.mjs", "public/app.js")
+
+
+def code_fingerprint():
+    import hashlib
+    digest = hashlib.sha256()
+    for name in _WATCH_GLOB:
+        path = DATA.parent / name
+        try:
+            stat = path.stat()
+            digest.update(f"{name}:{stat.st_size}:{int(stat.st_mtime)}".encode())
+        except OSError:
+            continue
+    return digest.hexdigest()
+
+
+def auto_obs_state():
+    try:
+        with open(AUTO_OBS, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        state = {}
+    state.setdefault("enabled", True)
+    state.setdefault("fingerprint", "")
+    state.setdefault("stable_since", 0.0)
+    state.setdefault("last_start", 0.0)
+    return state
+
+
+def save_auto_obs(state):
+    try:
+        with open(AUTO_OBS, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def maybe_auto_observation(force=False):
+    state = auto_obs_state()
+    if not state.get("enabled"):
+        return {"ok": False, "reason": "自动观察已关闭"}
+    fingerprint = code_fingerprint()
+    now = time.time()
+    if fingerprint != state.get("fingerprint"):
+        state["fingerprint"] = fingerprint
+        state["stable_since"] = now
+        save_auto_obs(state)
+        return {"ok": False, "reason": "代码刚变化，稳定计时重新开始",
+                "stable_since": now}
+    stable_since = float(state.get("stable_since") or now)
+    if not stable_since:
+        state["stable_since"] = now
+        save_auto_obs(state)
+        return {"ok": False, "reason": "开始稳定计时"}
+    stable_hours = (now - stable_since) / 3600.0
+    if not force and stable_hours < STABLE_HOURS:
+        return {"ok": False, "reason": "稳定时间不足", "stable_hours": round(stable_hours, 2)}
+    if observation_active():
+        return {"ok": False, "reason": "观察期已在进行"}
+    if now - float(state.get("last_start") or 0) < STABLE_HOURS * 3600:
+        return {"ok": False, "reason": "距上次自动开始不足 24 小时"}
+    result = observation_start(7)
+    state["last_start"] = now
+    save_auto_obs(state)
+    log_event("observation-auto", {"days": 7, "stable_hours": round(stable_hours, 1)})
+    return {"ok": True, "started": True, "stable_hours": round(stable_hours, 1), **result}
 
 
 VISION_MODEL = "/sdcard/模型文件/gemma-4-E2B_q4_0-it.gguf"
@@ -624,7 +694,7 @@ def orchestrate(payload):
     if not content:
         return {"ok": False, "reason": "没有可用输入"}
     state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
-    session = str(payload.get("session") or "default")[:40]
+    session = str(payload.get("session") or "main")[:40]
     with _orch_lock:
         sessions = load_orch_history()
         history = sessions.get(session) or []
@@ -690,7 +760,8 @@ def orchestrate(payload):
     try:
         trajectory.add({"expression": expression, "gesture": gesture, "speaking": False,
                         "mood": mood.snapshot().get("label"), "scene": "orchestrate",
-                        "params": state.get("params") or {}, "source": "orchestrate"})
+                        "params": state.get("params") or {}, "source": "orchestrate",
+                        "context_text": content})
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -956,6 +1027,16 @@ def shadow_learn(limit=6):
             except Exception:  # noqa: BLE001
                 pass
             try:
+                with _orch_lock:
+                    sessions = load_orch_history()
+                    history = sessions.get("main") or []
+                    history.append({"role": "user" if role == "user" else "assistant",
+                                    "content": text[:800]})
+                    sessions["main"] = history[-40:]
+                    save_orch_history(sessions)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
                 organs.observe({"kind": "chat", "text": text, "intensity": 0.4})
             except Exception:  # noqa: BLE001
                 pass
@@ -991,6 +1072,7 @@ def shadow_learn(limit=6):
                         "scene": "shadow-chat",
                         "params": params,
                         "source": "shadow",
+                        "context_text": text,
                     })
                 except Exception:  # noqa: BLE001
                     pass
@@ -2313,7 +2395,7 @@ def consolidate_layers(force=False, min_override=None, kind="consolidation"):
         try:
             conn = sqlite3.connect(str(DATA / "trajectory.db"), timeout=5)
             rows = conn.execute(
-                "SELECT ts, expression, gesture, speaking, mood, params, next_expression, next_gesture "
+                "SELECT ts, expression, gesture, speaking, mood, params, next_expression, next_gesture, source, text, context_text "
                 "FROM trajectories WHERE ts > ? AND next_expression IS NOT NULL AND next_expression != '' ORDER BY ts",
                 (since,),
             ).fetchall()
@@ -2329,7 +2411,7 @@ def consolidate_layers(force=False, min_override=None, kind="consolidation"):
             try:
                 conn = sqlite3.connect(str(DATA / "trajectory.db"), timeout=5)
                 replay = conn.execute(
-                    "SELECT ts, expression, gesture, speaking, mood, params, next_expression, next_gesture "
+                    "SELECT ts, expression, gesture, speaking, mood, params, next_expression, next_gesture, source, text, context_text "
                     "FROM trajectories WHERE next_expression IS NOT NULL AND next_expression != '' "
                     "ORDER BY ts DESC LIMIT 24"
                 ).fetchall()
@@ -2496,7 +2578,7 @@ def arbitrate(reply, state, user_text=None):
     context = (str(user_text) if user_text else "") + "；心情" + str(state.get("mood") or mood.label())
     attention = self_model.attention(context, state=state)
     local = layers.predict(expression, gesture, False, params, state.get("mood") or mood.label(),
-                           attention=attention)
+                           attention=attention, text=context)
     llm_expr = reply.get("expression") or "neutral"
     llm_gest = reply.get("gesture") or ""
     mood_expr = mood.snapshot()["expression"]
@@ -3004,6 +3086,19 @@ class Handler(BaseHTTPRequestHandler):
                 "attention": self_model.focus(),
                 "updated_at": presence.get("last_seen"),
             })
+        if path == "/api/session/main":
+            with _orch_lock:
+                sessions = load_orch_history()
+            history = sessions.get("main") or []
+            return self._send(200, {"session": "main", "count": len(history),
+                                    "messages": history[-12:]})
+        if path == "/api/observation/auto":
+            state = auto_obs_state()
+            stable_hours = (time.time() - float(state.get("stable_since") or 0)) / 3600.0
+            return self._send(200, {"enabled": state.get("enabled"),
+                                    "stable_hours": round(stable_hours, 2),
+                                    "required_hours": STABLE_HOURS,
+                                    "fingerprint": (state.get("fingerprint") or "")[:12]})
         if path == "/api/observation":
             history = []
             try:
@@ -3381,7 +3476,8 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             expression = (query.get("expression", ["neutral"])[0] or "neutral")
             gesture = (query.get("gesture", [""])[0] or "")
-            result = layers.predict(expression, gesture, False, {}, mood.label())
+            text = (query.get("text", [""])[0] or "")
+            result = layers.predict(expression, gesture, False, {}, mood.label(), text=text)
             return self._send(200, result or {"layers": [], "source": "none"})
         if path == "/api/strata/conflict":
             return self._send(200, strata.conflicts())
@@ -3475,7 +3571,8 @@ class Handler(BaseHTTPRequestHandler):
             }
             layered = layers.predict(snapshot.get("expression"), snapshot.get("gesture"),
                                      bool(snapshot.get("speaking")), snapshot.get("params"),
-                                     snapshot.get("mood") or mood.label())
+                                     snapshot.get("mood") or mood.label(),
+                                     text=(query.get("text", [""])[0] or ""))
             if layered:
                 return self._send(200, layered)
             trained = policy.predict(snapshot.get("expression"), snapshot.get("gesture"),
@@ -3782,12 +3879,63 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, multimodal_ingest_audio(
                 body.get("audio_base64") or body.get("audio") or "",
                 str(body.get("lang") or "zh"), str(body.get("source") or "web")))
+        if path == "/api/session/main":
+            with _orch_lock:
+                sessions = load_orch_history()
+            history = sessions.get("main") or []
+            return self._send(200, {"session": "main", "count": len(history),
+                                    "messages": history[-12:]})
+        if path == "/api/observation/auto":
+            state = auto_obs_state()
+            if body.get("enabled") is not None:
+                state["enabled"] = bool(body.get("enabled"))
+                save_auto_obs(state)
+            if body.get("run"):
+                return self._send(200, maybe_auto_observation(force=bool(body.get("force"))))
+            stable_hours = (time.time() - float(state.get("stable_since") or 0)) / 3600.0
+            return self._send(200, {"enabled": state.get("enabled"),
+                                    "stable_hours": round(stable_hours, 2),
+                                    "required_hours": STABLE_HOURS,
+                                    "fingerprint": state.get("fingerprint")[:12]})
         if path == "/api/observation/start":
             return self._send(200, observation_start(int(body.get("days") or 7)))
         if path == "/api/observation/stop":
             return self._send(200, observation_stop())
         if path == "/api/observation/daily":
             return self._send(200, observation_daily(force=True))
+        if path == "/api/trajectory/backfill-context":
+            import sqlite3 as _sqlite
+            chat_rows = []
+            try:
+                conn = _sqlite.connect(str(DATA / "memory.db"), timeout=5)
+                chat_rows = conn.execute(
+                    "SELECT ts, text FROM memories WHERE kind='chat' AND text LIKE '%对话里%' ORDER BY ts"
+                ).fetchall()
+                conn.close()
+            except _sqlite.Error:
+                chat_rows = []
+            filled = 0
+            try:
+                conn = _sqlite.connect(str(DATA / "trajectory.db"), timeout=5)
+                rows = conn.execute(
+                    "SELECT id, ts FROM trajectories WHERE COALESCE(context_text,'')='' ORDER BY ts"
+                ).fetchall()
+                for row_id, ts in rows:
+                    best = None
+                    best_gap = 1e12
+                    for chat_ts, chat_text in chat_rows:
+                        gap = abs(float(chat_ts) - float(ts))
+                        if gap < best_gap:
+                            best_gap = gap
+                            best = chat_text
+                    if best and best_gap <= 300:
+                        conn.execute("UPDATE trajectories SET context_text=? WHERE id=?", (str(best)[:400], row_id))
+                        filled += 1
+                conn.commit()
+                conn.close()
+            except _sqlite.Error as error:
+                return self._send(200, {"ok": False, "reason": str(error)[:120]})
+            return self._send(200, {"ok": True, "chats": len(chat_rows), "filled": filled})
         if path == "/api/shadow/run":
             return self._send(200, shadow_learn())
         if path == "/api/memory/graph/build":
@@ -4495,6 +4643,11 @@ def background_loop():
                     maybe_auto_volcano()
             except Exception as error:  # noqa: BLE001
                 log_event("thermal-error", str(error)[:150])
+            try:
+                if not observation_active():
+                    maybe_auto_observation()
+            except Exception as error:  # noqa: BLE001
+                log_event("observation-auto-error", str(error)[:150])
             if observation_active():
                 try:
                     observation_daily()
