@@ -154,7 +154,8 @@ async function mirrorLoop() {
         try {
           const body = await fetch('/api/body/say', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, source: 'mirror' }),
+            body: JSON.stringify({ text, source: 'mirror',
+              voice: { name: state.voice || '', rate: state.rate || '+0%', volume: 1 } }),
           }).then((res) => res.json()).catch(() => null)
           await speak(text, (body && body.expression) || 'neutral')
         } catch (err) { /* 忽略 */ }
@@ -1356,3 +1357,93 @@ setTimeout(systemTick, 8000)
 setInterval(systemTick, 60000)
 window.addEventListener('online', () => reportSystem('network', '网络恢复'))
 window.addEventListener('offline', () => reportSystem('network', '网络断开'))
+
+// ── 媒体测试：麦克风 / 扬声器 / 摄像头 ───────────────
+let testPreviewStream = null
+
+function testOut(text) {
+  const el = $('test-result')
+  if (el) el.textContent = text
+}
+
+async function testMic() {
+  if (recording) return
+  testOut('录音 3 秒…')
+  await startRecording()
+  setTimeout(async () => {
+    try {
+      if (processor) { processor.disconnect(); processor.onaudioprocess = null }
+      if (recordCtx) await recordCtx.close()
+      if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop())
+      processor = null; recordCtx = null; mediaStream = null; recording = false
+      const total = chunks.reduce((n, c) => n + c.length, 0)
+      if (total < 4000) { testOut('太短，没录到声音'); return }
+      const merged = new Float32Array(total)
+      let offset = 0
+      for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length }
+      chunks = []
+      const wav = encodeWav(merged, 16000)
+      const res = await fetch('/api/asr', { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wav })
+      const data = await res.json().catch(() => ({}))
+      testOut(data.text ? '识别：' + data.text : '没听清：' + (data.error || '未知'))
+    } catch (err) { testOut('麦克风测试失败：' + String(err && err.message || err)) }
+  }, 3000)
+}
+
+async function testSpeaker() {
+  testOut('播放测试音…')
+  try {
+    ensureAudio(); await audioCtx.resume()
+    const osc = audioCtx.createOscillator()
+    const gain = audioCtx.createGain()
+    osc.frequency.value = 660
+    gain.gain.value = 0.08
+    osc.connect(gain); gain.connect(audioCtx.destination)
+    osc.start(); setTimeout(() => osc.stop(), 250)
+  } catch (err) { testOut('测试音失败：' + String(err)) }
+  try {
+    testOut('测试音已播放，接着念一句…')
+    await speak('这是扬声器测试，能听到吗？', 'happy')
+    testOut('扬声器测试完成')
+  } catch (err) { testOut('朗读失败（TTS 需要联网）：' + String(err && err.message || err)) }
+}
+
+async function toggleVideoTest() {
+  const video = $('test-preview')
+  if (testPreviewStream) {
+    testPreviewStream.getTracks().forEach((t) => t.stop())
+    testPreviewStream = null
+    video.style.display = 'none'
+    testOut('摄像头已关闭')
+    return
+  }
+  try {
+    testPreviewStream = await navigator.mediaDevices.getUserMedia({ video: true })
+    video.srcObject = testPreviewStream
+    video.style.display = 'block'
+    testOut('摄像头预览中，点「拍一张」上传')
+  } catch (err) { testOut('摄像头打不开：' + String(err && err.message || err)) }
+}
+
+async function testShot() {
+  const video = $('test-preview')
+  if (!video || !testPreviewStream) { testOut('先点「摄像头」打开预览'); return }
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth || 640
+    canvas.height = video.videoHeight || 480
+    canvas.getContext('2d').drawImage(video, 0, 0)
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.75)
+    const res = await fetch('/api/multimodal/vision', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_base64: dataUrl, source: 'media-test' }),
+    })
+    const data = await res.json()
+    testOut(data.ok ? '已上传图片：' + (data.caption || '未识别') : '上传失败：' + (data.reason || ''))
+  } catch (err) { testOut('拍照失败：' + String(err && err.message || err)) }
+}
+
+if ($('test-mic')) $('test-mic').addEventListener('click', testMic)
+if ($('test-speaker')) $('test-speaker').addEventListener('click', testSpeaker)
+if ($('test-video')) $('test-video').addEventListener('click', toggleVideoTest)
+if ($('test-shot')) $('test-shot').addEventListener('click', testShot)

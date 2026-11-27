@@ -963,12 +963,49 @@ def maybe_auto_observation(force=False):
 
 VISION_MODEL = "/sdcard/模型文件/gemma-4-E2B_q4_0-it.gguf"
 VISION_PROJECTOR = "/sdcard/模型文件/mmproj-gemma-4-E2B-it-BF16.gguf"
-VLM_BIN = shutil.which("llama-mtmd-cli") if hasattr(__import__("shutil"), "which") else None
+VISION_BIN = "/root/workspace/tools/llama-b12811/llama-mtmd-cli"
+VISION_LIB = "/root/workspace/tools/llama-b12811"
+
+
+VISION_LOCK = threading.Lock()
+LOCAL_BRAIN_DIR = "/root/workspace/local-brain"
+
+
+def _stop_local_brain():
+    pid_file = os.path.join(LOCAL_BRAIN_DIR, "llm.pid")
+    try:
+        with open(pid_file, "r", encoding="utf-8") as handle:
+            pid = int(handle.read().strip())
+        os.kill(pid, 15)
+        time.sleep(1)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _start_local_brain_bg():
+    try:
+        subprocess.Popen(["sh", "start-llm.sh"], cwd=LOCAL_BRAIN_DIR,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def vision_with_scheduling(image_path):
+    """视觉按需：先腾内存给视觉模型，跑完再把对话模型拉回来。"""
+    with VISION_LOCK:
+        stopped = _stop_local_brain()
+        try:
+            return vision_describe(image_path)
+        finally:
+            if stopped:
+                threading.Thread(target=_start_local_brain_bg, daemon=True).start()
 
 
 def vision_status():
     import shutil as _shutil
-    binary = _shutil.which("llama-mtmd-cli")
+    binary = VISION_BIN if os.path.exists(VISION_BIN) else _shutil.which("llama-mtmd-cli")
     models_ok = os.path.exists(VISION_MODEL) and os.path.exists(VISION_PROJECTOR)
     return {
         "available": bool(binary and models_ok),
@@ -984,13 +1021,32 @@ def vision_describe(image_path):
     status = vision_status()
     if not status.get("available"):
         return None, status
+    small = image_path
+    try:
+        from PIL import Image
+        image = Image.open(image_path)
+        image.thumbnail((640, 640))
+        small = "/tmp/vision-small.jpg"
+        image.convert("RGB").save(small, quality=80)
+    except Exception:  # noqa: BLE001
+        small = image_path
+    env = dict(os.environ)
+    env["LD_LIBRARY_PATH"] = VISION_LIB + ":" + env.get("LD_LIBRARY_PATH", "")
     try:
         result = subprocess.run(
-            [status["binary"], "-m", VISION_MODEL, "--mmproj", VISION_PROJECTOR,
-             "--image", image_path, "-p", "用一句中文描述这张图片。", "-n", "40", "--no-display-prompt"],
-            capture_output=True, text=True, timeout=120)
-        text = (result.stdout or "").strip()
-        return (text.splitlines()[-1][:200] if text else None), status
+            [status["binary"], "--jinja", "-m", VISION_MODEL, "--mmproj", VISION_PROJECTOR,
+             "--image", small, "-p", "这是一张照片。请直接用中文说出照片里有什么，一句话即可。不要输出英文，不要分析过程。",
+             "-n", "300", "-t", "6"],
+            capture_output=True, text=True, timeout=480, env=env)
+        raw = (result.stdout or "").strip()
+        import re as _re
+        sentences = _re.findall(r"[\u4e00-\u9fff，。！？、；：（）“”A-Za-z0-9\s]{6,}", raw)
+        chinese = [part.strip() for part in sentences if sum(1 for ch in part if "\u4e00" <= ch <= "\u9fff") >= 4]
+        if not chinese:
+            return None, {**status, "reason": "模型没有给出中文描述", "raw_tail": raw[-120:]}
+        text = chinese[-1]
+        text = _re.sub(r"\s+", " ", text)[:160]
+        return text, status
     except Exception as error:  # noqa: BLE001
         return None, {"available": False, "reason": str(error)[:120]}
 
@@ -1174,7 +1230,8 @@ def planet_section(rows):
             continue
         centroids.append({"label": meta.get("label"), "x": round(float(projected[0] / scale), 3),
                           "y": round(float(projected[1] / scale), 3),
-                          "kind": meta.get("kind")})
+                          "kind": meta.get("kind"),
+                          "era": (meta.get("feature_schema") or {}).get("era")})
     # 认知梯度：相邻层 JS 散度平均
     ordered = sorted(layer_items, key=lambda item: int(item[0]))
     gradient = []
@@ -1296,7 +1353,7 @@ def planet_section(rows):
     }
 
 
-def body_say(text, expression=None, source="agent"):
+def body_say(text, expression=None, source="agent", voice=None):
     """单主体 A：语言只来自 Agent；这里只让身体按这句话表达。"""
     text = str(text or "").strip()
     if not text:
@@ -1304,7 +1361,9 @@ def body_say(text, expression=None, source="agent"):
     state = dict(_presence) if isinstance(_presence, dict) else {}
     current_expression = state.get("expression") or "neutral"
     current_gesture = state.get("gesture") or ""
-    params = state.get("params") or {}
+    params = dict(state.get("params") or {})
+    if isinstance(voice, dict):
+        params["voice"] = voice
     mood_label = mood.snapshot().get("label")
     prediction = None
     try:
@@ -3569,7 +3628,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self):
         length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0 or length > 64 * 1024:
+        if length <= 0 or length > 8 * 1024 * 1024:
             return {}
         try:
             return json.loads(self.rfile.read(length).decode("utf-8"))
@@ -3688,7 +3747,34 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
             return self._send(200, {"items": recent[-10:]})
-        if path == "/api/calibration/status":
+        if path == "/api/strata/eras":
+            groups = {}
+            for bucket, meta in layers.meta.items():
+                schema = meta.get("feature_schema")
+                if not schema:
+                    model = layers.models.get(bucket)
+                    dim = int(model["w_expr"].shape[0]) if model else len(meta.get("feature_centroid") or [])
+                    schema = {"dims": dim, "features": [], "era": "E%d" % dim if dim else "?"}
+                key = schema.get("era") or str(schema.get("dims"))
+                group = groups.setdefault(key, {"era": key, "dims": schema.get("dims"),
+                                                "features": schema.get("features") or [],
+                                                "count": 0, "labels": []})
+                group["count"] += 1
+                if len(group["labels"]) < 6:
+                    group["labels"].append(meta.get("label"))
+            memory_layers = graph.layers().get("layers") or []
+            weight_by_day = {}
+            for meta in layers.meta.values():
+                trained = str(meta.get("trained_at") or "")[:10]
+                if trained:
+                    weight_by_day[trained] = weight_by_day.get(trained, 0) + 1
+            for item in memory_layers:
+                label = item.get("label") or ""
+                item["weight_layers_same_day"] = weight_by_day.get("2026-" + label, 0)
+            return self._send(200, {"weight_eras": sorted(groups.values(), key=lambda g: g.get("dims") or 0),
+                                    "memory_layers": memory_layers,
+                                    "note": "权重层按感官纪元分组；记忆图谱按天分层，两边的日期彼此对应"})
+        if path == "/api/layers/backfill-schema":
             return self._send(200, layers.temperature_status())
         if path == "/api/planet/section":
             rows = layers._rows()[-int(query.get("limit", ["200"])[0] or 200):] if (query := urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")) else layers._rows()[-200:]
@@ -4086,7 +4172,14 @@ class Handler(BaseHTTPRequestHandler):
             expression = (query.get("expression", ["neutral"])[0] or "neutral")
             gesture = (query.get("gesture", [""])[0] or "")
             text = (query.get("text", [""])[0] or "")
-            result = layers.predict(expression, gesture, False, {}, mood.label(), text=text)
+            voice_param = None
+            if query.get("voice_rate") or query.get("voice_name") or query.get("voice_volume"):
+                voice_param = {"rate": (query.get("voice_rate", ["+0%"])[0] or "+0%"),
+                               "name": (query.get("voice_name", [""])[0] or ""),
+                               "volume": (query.get("voice_volume", ["1"])[0] or "1")}
+            result = layers.predict(expression, gesture, False,
+                                    {"voice": voice_param} if voice_param else {},
+                                    mood.label(), text=text)
             return self._send(200, result or {"layers": [], "source": "none"})
         if path == "/api/strata/conflict":
             return self._send(200, strata.conflicts())
@@ -4450,12 +4543,33 @@ class Handler(BaseHTTPRequestHandler):
             if not image_result.get("ok"):
                 return self._send(200, image_result)
             description = str(body.get("caption") or "").strip()
+            brightness = 0.5
+            try:
+                from PIL import Image
+                image = Image.open(image_result["path"]).convert("L")
+                image.thumbnail((32, 32))
+                pixels = list(image.getdata())
+                brightness = round(sum(pixels) / max(1, len(pixels)) / 255.0, 3)
+            except Exception:  # noqa: BLE001
+                pass
             status = vision_status()
             if not description:
-                description, status = vision_describe(image_result["path"])
+                description, status = vision_with_scheduling(image_result["path"])
             if description:
                 try:
                     memory.add("image", "看到画面：" + description[:300], importance=0.45)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    presence_now = dict(_presence) if isinstance(_presence, dict) else {}
+                    trajectory.add({"expression": presence_now.get("expression") or "neutral",
+                                    "gesture": presence_now.get("gesture") or "",
+                                    "speaking": False, "mood": mood.snapshot().get("label"),
+                                    "scene": "vision",
+                                    "params": {"vision": {"caption": description[:200],
+                                                          "brightness": brightness,
+                                                          "path": image_result["path"]}},
+                                    "source": "vision"})
                 except Exception:  # noqa: BLE001
                     pass
             return self._send(200, {**image_result, "caption": description or "（未识别）",
@@ -4525,6 +4639,24 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/calibration/fit":
             rows = layers._rows()[-400:]
             return self._send(200, layers.calibrate_temperature(rows))
+        if path == "/api/layers/backfill-schema":
+            import json as _json
+            filled = 0
+            force = bool(body.get("force"))
+            for bucket, meta in list(layers.meta.items()):
+                if meta.get("feature_schema") and not force:
+                    continue
+                centroid_len = len(meta.get("feature_centroid") or [])
+                model = layers.models.get(bucket)
+                dim = centroid_len if centroid_len else (int(model["w_expr"].shape[0]) if model else 0)
+                meta["feature_schema"] = {"dims": dim, "features": ["state"] + (["text"] if dim >= 31 else []) + (["voice"] if dim >= 34 else []), "era": "E%d" % dim if dim else "?"}
+                layers.meta[bucket] = meta
+                try:
+                    layers._save_layer(bucket, meta)
+                except Exception:  # noqa: BLE001
+                    pass
+                filled += 1
+            return self._send(200, {"ok": True, "filled": filled})
         if path == "/api/living/sleep":
             threshold = int(tunables.get("living_sleep_steps") or 40)
             status = layers.living_status()
@@ -4557,7 +4689,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/body/say":
             return self._send(200, body_say(body.get("text") or body.get("content") or "",
                                             body.get("expression") or None,
-                                            str(body.get("source") or "agent")))
+                                            str(body.get("source") or "agent"),
+                                            body.get("voice") if isinstance(body.get("voice"), dict) else None))
         if path == "/api/system/ingest":
             return self._send(200, system_ingest(body.get("kind") or "unknown",
                                                  body.get("text") or "", body.get("source") or "client",

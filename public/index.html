@@ -126,6 +126,16 @@
     </select></div>
     <button class="ghost" id="correct-btn">纠正她刚才的表现</button>
     <div class="field"><label><input type="checkbox" id="vision-loop"> 连续视觉（定时抓帧接入）</label></div>
+    <div class="field"><label>媒体测试</label>
+      <div class="row" style="gap:6px;flex-wrap:wrap">
+        <button id="test-mic">麦克风</button>
+        <button id="test-speaker">扬声器</button>
+        <button id="test-video">摄像头</button>
+        <button id="test-shot">拍一张</button>
+      </div>
+      <div id="test-result" class="muted" style="font-size:12px;margin-top:6px"></div>
+      <video id="test-preview" autoplay playsinline muted style="display:none;width:100%;max-height:220px;border-radius:12px;margin-top:6px"></video>
+    </div>
     <div class="field"><label>多模态接入</label>
       <div class="row" style="gap:6px">
         <button id="mm-camera">拍照</button>

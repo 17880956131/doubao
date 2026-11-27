@@ -16,10 +16,61 @@ from trajectory_store import embed
 
 MIN_LAYER_SAMPLES = 8
 TEXT_DIM = 8
+VOICE_DIM = 3
+VISUAL_DIM = 4
 _POSITIVE = ("开心", "喜欢", "谢谢", "好棒", "哈哈", "可爱", "不错", "厉害", "温暖", "陪你")
 _NEGATIVE = ("难过", "累", "烦", "讨厌", "生气", "哭", "压力", "抱歉", "可惜", "遗憾")
 _THREAT = ("删", "滚", "闭嘴", "恨", "威胁", "弄死", "走开")
 _INTIMATE = ("想你", "抱", "亲", "爱你", "陪我")
+
+
+def feature_schema(dim):
+    dim = int(dim)
+    features = ["state"]
+    if dim >= FEATURE_DIM + TEXT_DIM:
+        features.append("text")
+    if dim >= FEATURE_DIM + TEXT_DIM + VOICE_DIM:
+        features.append("voice")
+    if dim >= FEATURE_DIM + TEXT_DIM + VOICE_DIM + VISUAL_DIM:
+        features.append("vision")
+    return {"dims": dim, "features": features, "era": "E%d" % dim}
+
+
+def voice_features(params):
+    """语音合成参数特征：语速、音色指纹、音量。"""
+    voice = (params or {}).get("voice") if isinstance(params, dict) else None
+    if not isinstance(voice, dict):
+        return [0.0, 0.0, 0.0]
+    rate = str(voice.get("rate") or "+0%")
+    try:
+        rate_value = float(rate.strip("%+")) / 100.0
+    except ValueError:
+        rate_value = 0.0
+    name = str(voice.get("name") or "")
+    if name:
+        fingerprint = (sum(ord(ch) for ch in name) % 100) / 100.0
+    else:
+        fingerprint = 0.0
+    try:
+        volume = float(voice.get("volume") or 1.0)
+    except (TypeError, ValueError):
+        volume = 1.0
+    return [round(rate_value, 3), round(fingerprint, 3), round(max(0.0, min(1.0, volume)), 3)]
+
+
+def vision_features(params):
+    """视觉特征：有无图、描述长度、亮度、描述指纹。"""
+    vision = (params or {}).get("vision") if isinstance(params, dict) else None
+    if not isinstance(vision, dict) or not vision:
+        return [0.0, 0.0, 0.0, 0.0]
+    caption = str(vision.get("caption") or "")
+    length = min(len(caption) / 60.0, 1.0)
+    try:
+        brightness = float(vision.get("brightness") or 0.5)
+    except (TypeError, ValueError):
+        brightness = 0.5
+    fingerprint = (sum(ord(ch) for ch in caption) % 100) / 100.0 if caption else 0.0
+    return [1.0, round(length, 3), round(brightness, 3), round(fingerprint, 3)]
 
 
 def text_features(text):
@@ -210,7 +261,8 @@ class LayerModelManager:
             except ValueError:
                 params = {}
             row_text = row[10] if len(row) > 10 and isinstance(row[10], str) else ""
-            X.append(list(encode(expression, gesture, bool(speaking), params, mood)) + text_features(row_text))
+            X.append(list(encode(expression, gesture, bool(speaking), params, mood))
+                     + text_features(row_text) + voice_features(params) + vision_features(params))
             y_expr.append(EXPRESSIONS.index(next_expr) if next_expr in EXPRESSIONS else 0)
             y_gest.append(GESTURES.index(next_gest) if next_gest in GESTURES else 0)
             weight = max(0.15, float(quality)) if isinstance(quality, (int, float)) else 1.0
@@ -328,6 +380,7 @@ class LayerModelManager:
             "range": [min(times), max(times)] if times else None,
             "feature_centroid": centroid.tolist(),
             "label": label or ("巩固层 " + time.strftime("%H:%M:%S")),
+            "feature_schema": feature_schema(X.shape[1]),
             "granularity": "consolidation",
             "kind": kind,
             "frozen": True,
@@ -458,7 +511,7 @@ class LayerModelManager:
                 bucket = int(record.get("bucket") or 0)
                 data = np.load(path[:-5] + ".npz")
                 weights = {key: data[key] for key in data.files}
-                adapted, notes = model_store.adapt_weights(weights, record, FEATURE_DIM + TEXT_DIM,
+                adapted, notes = model_store.adapt_weights(weights, record, FEATURE_DIM + TEXT_DIM + VOICE_DIM + VISUAL_DIM,
                                                            EXPRESSIONS, GESTURES)
                 if notes:
                     record["compat"] = {"migrated": True, "notes": notes,
@@ -499,7 +552,8 @@ class LayerModelManager:
         with self.lock:
             if not self.models:
                 return None
-            x = np.asarray(list(encode(expression, gesture, speaking, params, mood)) + text_features(text),
+            x = np.asarray(list(encode(expression, gesture, speaking, params, mood))
+                           + text_features(text) + voice_features(params) + vision_features(params),
                            dtype=np.float64).reshape(1, -1)
             probs_expr = np.zeros(len(EXPRESSIONS), dtype=np.float64)
             probs_gest = np.zeros(len(GESTURES), dtype=np.float64)
@@ -785,7 +839,7 @@ class LayerModelManager:
                     if bucket in self.models:
                         return bucket
             bucket = int(time.time() * 1000)
-            dim = FEATURE_DIM + TEXT_DIM
+            dim = FEATURE_DIM + TEXT_DIM + VOICE_DIM + VISUAL_DIM
             self.models[bucket] = {
                 "w_expr": np.zeros((dim, len(EXPRESSIONS)), dtype=np.float32),
                 "b_expr": np.zeros(len(EXPRESSIONS), dtype=np.float32),
@@ -797,6 +851,7 @@ class LayerModelManager:
                 "kind": "living", "granularity": "living", "frozen": False,
                 "living": True, "samples": 0, "weight": 0.15, "adapted_weight": 0.15,
                 "feature_centroid": [0.0] * dim,
+                "feature_schema": feature_schema(dim),
                 "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
             self._save_layer(bucket, self.meta[bucket])
