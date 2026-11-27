@@ -857,6 +857,64 @@ class LayerModelManager:
             self._save_layer(bucket, self.meta[bucket])
             return bucket
 
+    def add_residual_layer(self, rows, weight=0.6, label=None, min_wrong=6):
+        """残差层：专门学当前集成答错的样本，站在已有认知上打补丁。"""
+        rows = list(rows)
+        X, y_expr, y_gest, base_w = self._features(rows)
+        if X.shape[0] < min_wrong * 2:
+            return {"ok": False, "reason": "样本不足", "samples": int(X.shape[0])}
+        params = _ensemble_params()
+        blend = np.zeros((X.shape[0], len(EXPRESSIONS)), dtype=np.float64)
+        total = 0.0
+        with self.lock:
+            for bucket, model in self.models.items():
+                meta = self.meta.get(bucket, {})
+                if meta.get("rejected") or meta.get("fossil") or (meta.get("semantic") or {}).get("stale"):
+                    continue
+                width = int(model["w_expr"].shape[0])
+                logits = X[:, :width] @ model["w_expr"] + model["b_expr"]
+                logits -= logits.max(axis=1, keepdims=True)
+                probs = np.exp(logits)
+                probs /= probs.sum(axis=1, keepdims=True)
+                base = max(float(meta.get("adapted_weight") or meta.get("weight") or 0.1), 1e-6)
+                layer_weight = (base ** params["weight_power"]) * (max(meta.get("samples", 1), 1) ** params["sample_power"])
+                blend += probs * layer_weight
+                total += layer_weight
+        if total <= 0:
+            return {"ok": False, "reason": "没有活跃层"}
+        pred = (blend / total).argmax(axis=1)
+        wrong = pred != np.asarray(y_expr)
+        if int(wrong.sum()) < min_wrong:
+            return {"ok": False, "reason": "错题不足", "wrong": int(wrong.sum())}
+        sample_weight = np.asarray(base_w, dtype=np.float64) * np.where(wrong, 3.0, 0.5)
+        w_expr, b_expr, acc_expr = _softmax_train(X, y_expr, len(EXPRESSIONS), sample_weight=sample_weight)
+        w_gest, b_gest, acc_gest = _softmax_train(X, y_gest, len(GESTURES), sample_weight=sample_weight)
+        bucket = int(time.time() * 1000)
+        centroid = np.round(X.mean(axis=0), 4)
+        record = {
+            "bucket": bucket,
+            "range": None,
+            "feature_centroid": centroid.tolist(),
+            "feature_schema": feature_schema(X.shape[1]),
+            "label": label or ("残差层 " + time.strftime("%H:%M:%S")),
+            "granularity": "residual",
+            "kind": "residual",
+            "frozen": True,
+            "rows": len(rows),
+            "samples": int(X.shape[0]),
+            "wrong_trained": int(wrong.sum()),
+            "weight": round(float(weight), 3),
+            "accuracy_expression": round(acc_expr, 3),
+            "accuracy_gesture": round(acc_gest, 3),
+            "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        with self.lock:
+            self.models[bucket] = {"w_expr": w_expr, "b_expr": b_expr, "w_gest": w_gest, "b_gest": b_gest}
+            self.meta[bucket] = record
+        self._save_layer(bucket, record)
+        return {"ok": True, "layer": record, "wrong": int(wrong.sum()),
+                "samples": int(X.shape[0])}
+
     def online_step(self, row, lr=0.02):
         """单样本在线 SGD：同一张图前向算概率、反向更新权重。"""
         bucket = self.ensure_living_layer()

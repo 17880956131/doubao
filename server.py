@@ -5579,6 +5579,30 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
+        if path == "/api/layers/train-residual":
+            if observation_active():
+                return self._send(200, {"ok": False, "frozen": True,
+                                        "reason": "观察期内不改权重；观察结束后再训残差层"})
+            rows = layers._rows()[-300:]
+            if len(rows) < 80:
+                return self._send(200, {"ok": False, "reason": "样本不足", "samples": len(rows)})
+            split = max(40, int(len(rows) * 0.6))
+            train_rows, test_rows = rows[:split], rows[split:]
+            def holdout_accuracy():
+                probs, y = layers.ensemble_matrix(test_rows)
+                if probs is None:
+                    return None
+                return round(float((probs.argmax(axis=1) == y).mean()), 3)
+            before = holdout_accuracy()
+            result = layers.add_residual_layer(train_rows, weight=1.3,
+                                               label="残差层 " + time.strftime("%H:%M:%S"))
+            after = holdout_accuracy()
+            log_event("residual-layer", {"ok": result.get("ok"), "before": before,
+                                         "after": after, "wrong": result.get("wrong")})
+            return self._send(200, {**result, "holdout_before": before,
+                                    "holdout_after": after,
+                                    "delta": round((after or 0) - (before or 0), 3),
+                                    "note": "留出集是不参与训练的部分，看它才可信"})
         if path == "/api/knowledge/validate":
             return self._send(200, knowledge_validate(str(body.get("mode") or "account")))
         if path == "/api/knowledge/train":
