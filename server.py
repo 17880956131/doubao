@@ -5608,12 +5608,30 @@ class Handler(BaseHTTPRequestHandler):
             result = layers.add_residual_layer(train_rows, weight=1.3,
                                                label="残差层 " + time.strftime("%H:%M:%S"))
             after = holdout_accuracy()
+            reverted = False
+            if result.get("ok") and before is not None and after is not None and after < before - 0.01:
+                bucket = (result.get("layer") or {}).get("bucket")
+                if bucket is not None:
+                    with layers.lock:
+                        layers.models.pop(bucket, None)
+                        meta = layers.meta.get(bucket, {})
+                        meta["rejected"] = True
+                        meta["fossil"] = True
+                        meta["fossil_reason"] = "残差层留出集变差，自动回滚"
+                        layers.meta[bucket] = meta
+                    try:
+                        layers._save_layer(bucket, meta)
+                    except Exception:  # noqa: BLE001
+                        pass
+                reverted = True
+                after = holdout_accuracy()
             log_event("residual-layer", {"ok": result.get("ok"), "before": before,
-                                         "after": after, "wrong": result.get("wrong")})
+                                         "after": after, "wrong": result.get("wrong"),
+                                         "reverted": reverted})
             return self._send(200, {**result, "holdout_before": before,
-                                    "holdout_after": after,
+                                    "holdout_after": after, "reverted": reverted,
                                     "delta": round((after or 0) - (before or 0), 3),
-                                    "note": "留出集是不参与训练的部分，看它才可信"})
+                                    "note": "留出集是不参与训练的部分；变差会自动回滚"})
         if path == "/api/knowledge/validate":
             return self._send(200, knowledge_validate(str(body.get("mode") or "account")))
         if path == "/api/knowledge/train":
