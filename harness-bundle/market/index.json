@@ -1,0 +1,42 @@
+{
+  "format": 1,
+  "title": "豆宝插件",
+  "metadata": {
+    "description": {
+      "zh": "豆宝相关的 Harness 插件",
+      "en": "Doubao plugins for Harness"
+    }
+  },
+  "plugins": [
+    {
+      "name": "doubao-bridge",
+      "defaultVersion": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "publishTimestamp": 1795757248,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/17880956131/doubao-harness-bundle.git",
+            "commit": "bbd602ad477db38f2c17fbae5ea8ae0109029367"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+          }
+        }
+      ],
+      "metadata": {
+        "title": {
+          "zh": "豆宝桥",
+          "en": "Doubao bridge"
+        },
+        "description": {
+          "zh": "和本地数字人豆宝对话：她会用自己的记忆、心情和表情回应。",
+          "en": "Talk to the local Doubao digital human with her own memory, mood, and expression."
+        },
+        "author": "17880956131",
+        "repository": "https://github.com/17880956131/doubao-harness-bundle"
+      }
+    }
+  ]
+}
