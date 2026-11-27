@@ -558,6 +558,20 @@ MM_DIR = DATA / "media"
 SYSTEM_EVENTS = DATA / "system_events.jsonl"
 SELF_CORE = DATA / "self_core.json"
 SOCIAL = DATA / "social.json"
+PLANETS = DATA / "planets"
+
+
+def planet_dir(user="owner"):
+    """行星目录：owner 用现有 data/，其他用户预留到 data/planets/<user>/。"""
+    user = str(user or "owner")
+    if user in ("owner", "", "default"):
+        return DATA
+    target = PLANETS / "".join(ch for ch in user if ch.isalnum() or ch in "-_")[:40]
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return target
 
 
 def social_state():
@@ -3966,6 +3980,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/system/recent":
             return self._send(200, {"events": load_system_events(20),
                                     "summary": (lambda: (json.load(open(SYSTEM_DIGEST, encoding="utf-8")).get("summary") if SYSTEM_DIGEST.exists() else None))()})
+        if path == "/api/planet/identity":
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            user = (query.get("user", [""])[0] or "").strip() or "owner"
+            known = []
+            if PLANETS.exists():
+                known = [item.name for item in PLANETS.iterdir() if item.is_dir()]
+            return self._send(200, {"mode": "personal", "user": user,
+                                    "dir": str(planet_dir(user)),
+                                    "known_planets": known,
+                                    "note": "个人版：单行星 owner；服务版接认证后再启用多行星"})
         if path == "/api/social":
             return self._send(200, social_state())
         if path == "/api/memory/history":
