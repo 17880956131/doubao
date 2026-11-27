@@ -10,3 +10,7 @@ __pycache__/
 .venv/
 
 tools/
+
+local-brain/node_modules/
+local-brain/*.log
+local-brain/*.pid
