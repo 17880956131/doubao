@@ -1,24 +1,24 @@
 {
   "format": 1,
-  "title": "豆宝插件",
+  "title": "智命插件",
   "metadata": {
     "description": {
-      "zh": "豆宝相关的 Harness 插件",
-      "en": "Doubao plugins for Harness"
+      "zh": "智命（ZhiMing）相关的 Harness 插件",
+      "en": "ZhiMing plugins for Harness"
     }
   },
   "plugins": [
     {
-      "name": "doubao-bridge",
+      "name": "zhiming-bridge",
       "defaultVersion": "0.1.0",
       "versions": [
         {
           "version": "0.1.0",
-          "publishTimestamp": 1795759100,
+          "publishTimestamp": 1795759760,
           "source": {
             "type": "git",
-            "url": "https://github.com/17880956131/doubao.git",
-            "commit": "e2c59357d53bb43813681303075a8b140e493fbd",
+            "url": "https://github.com/17880956131/zhiming.git",
+            "commit": "2af5d46541c1762f0fc52cea0fd1365d4e32f452",
             "path": "harness-bundle"
           },
           "engines": {
@@ -28,15 +28,15 @@
       ],
       "metadata": {
         "title": {
-          "zh": "豆宝桥",
-          "en": "Doubao bridge"
+          "zh": "智命桥",
+          "en": "ZhiMing bridge"
         },
         "description": {
-          "zh": "和本地数字人豆宝对话：她会用自己的记忆、心情和表情回应。",
-          "en": "Talk to the local Doubao digital human with her own memory, mood, and expression."
+          "zh": "和智命（ZhiMing）里的数字人豆宝对话：她会用自己的记忆、心情和表情回应。",
+          "en": "Talk to Doubao, the local digital human inside ZhiMing; she answers with her own memory, mood, and expression."
         },
         "author": "17880956131",
-        "repository": "https://github.com/17880956131/doubao"
+        "repository": "https://github.com/17880956131/zhiming"
       }
     }
   ]
