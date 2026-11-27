@@ -2462,6 +2462,60 @@ def benchmark_trend():
             "note": "跨天基准：优先只统计观察期内的运行；一天内多次运行不算成长"}
 
 
+def prune_preview(quality_threshold=0.35):
+    """治理预演：不删任何层，只算清掉弱层/重复层后的效果。"""
+    import numpy as np
+    active = []
+    fossils = []
+    for bucket, meta in layers.meta.items():
+        quality = float(meta.get("recent_accuracy") or meta.get("accuracy_expression") or 0.0)
+        item = {"label": meta.get("label"), "kind": meta.get("kind"),
+                "era": (meta.get("feature_schema") or {}).get("era"),
+                "quality": round(quality, 3), "samples": meta.get("samples"),
+                "weight": meta.get("adapted_weight") or meta.get("weight"),
+                "duplicate_of": meta.get("duplicate_of")}
+        if meta.get("rejected") or meta.get("fossil"):
+            fossils.append(item)
+        else:
+            active.append((bucket, meta, quality, item))
+    weak = [item for _b, _m, q, item in active if q < quality_threshold]
+    keep = [(b, m, q) for b, m, q, item in active if q >= quality_threshold]
+    rows = layers._rows()[-120:]
+    X, y_expr, _yg, _w = layers._features(rows)
+    def ensemble_accuracy(items):
+        if not items or X.shape[0] == 0:
+            return None
+        blend = np.zeros((X.shape[0], len(EXPRESSIONS)))
+        total = 0.0
+        for b, m, q in items:
+            model = layers.models.get(b)
+            if not model:
+                continue
+            width = int(model["w_expr"].shape[0])
+            logits = X[:, :width] @ model["w_expr"] + model["b_expr"]
+            logits -= logits.max(axis=1, keepdims=True)
+            p = np.exp(logits); p /= p.sum(axis=1, keepdims=True)
+            weight = max(float(m.get("adapted_weight") or m.get("weight") or 0.2), 1e-6)
+            blend += p * weight
+            total += weight
+        if total <= 0:
+            return None
+        return round(float(((blend / total).argmax(axis=1) == y_expr).mean()), 3)
+    return {
+        "ok": True,
+        "active": len(active), "fossils": len(fossils), "weak": len(weak),
+        "bloat": round(len(fossils) / max(1, len(active) + len(fossils)), 3),
+        "accuracy_all": ensemble_accuracy([(b, m, q) for b, m, q, _item in active]),
+        "accuracy_kept": ensemble_accuracy(keep),
+        "quality_threshold": quality_threshold,
+        "weak_labels": [item["label"] for item in weak[:10]],
+        "fossil_labels": [item["label"] for item in fossils[:10]],
+        "recommendation": ("清理后活跃层 %d，准确率 %s；建议观察期结束后执行"
+                           % (len(keep), ensemble_accuracy(keep))),
+        "note": "这是预演，不删除任何层；观察期冻结中不改权重",
+    }
+
+
 def uncertainty_metrics():
     """把"疑惑"拆成多样性与不确定性，避免把层多当变糊涂。"""
     import numpy as np
@@ -3923,6 +3977,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, "not found", "text/plain; charset=utf-8")
             content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
             return self._send(200, target.read_bytes(), content_type)
+        if path == "/api/layers/prune-preview":
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            threshold = float((query.get("threshold", ["0.35"])[0] or 0.35))
+            return self._send(200, prune_preview(threshold))
         if path == "/api/metrics/uncertainty":
             return self._send(200, uncertainty_metrics())
         if path == "/api/thoughts/recent":
