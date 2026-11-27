@@ -560,6 +560,122 @@ SELF_CORE = DATA / "self_core.json"
 SOCIAL = DATA / "social.json"
 ENVIRONMENT = DATA / "environment.json"
 CURIOSITY = DATA / "curiosity.jsonl"
+PREDICTIONS = DATA / "predictions.jsonl"
+HALLUCINATIONS = DATA / "hallucinations.jsonl"
+
+
+def _read_jsonl(path):
+    items = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        return []
+    return items
+
+
+def _append_jsonl(path, item):
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def curiosity_predict(entity, guess=None, session="main"):
+    """先想再搜：让她先猜一个答案，等搜索结果回来对照。"""
+    entity = str(entity or "").strip()[:40]
+    if not entity:
+        return {"ok": False, "reason": "没有实体"}
+    guess = str(guess or "").strip()
+    source = "agent" if guess else "local"
+    if not guess:
+        if not local_brain_ok():
+            return {"ok": False, "reason": "本地模型不在线且没有给猜测"}
+        try:
+            raw = openai_chat("http://127.0.0.1:8181/v1", "", "r1-1.5b",
+                              "用一个短句猜一猜：%s 是什么？只说猜测，不超过30字。" % entity,
+                              [], "zh", system=self_core_text() + "\n只输出一句猜测，不要解释。", timeout=60)
+            parsed = parse_reply(raw)
+            guess = str(parsed.get("text") or "").strip()[:200]
+        except Exception as error:  # noqa: BLE001
+            return {"ok": False, "reason": "猜测失败：" + str(error)[:80]}
+    if not guess:
+        return {"ok": False, "reason": "猜不出来"}
+    item = {"ts": time.time(), "entity": entity, "guess": guess, "source": source,
+            "session": session, "status": "pending"}
+    _append_jsonl(PREDICTIONS, item)
+    try:
+        memory.add("guess", "我猜：" + entity + "：" + guess, importance=0.25,
+                   source="imagined", session="reading", person="owner")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "entity": entity, "guess": guess, "source": source}
+
+
+def compare_prediction(entity, fact_text):
+    """拿实际搜到的内容对照之前猜的：一致=奖励，不一致=幻觉惩罚。"""
+    import struct
+    fact_text = str(fact_text or "")
+    pending = [item for item in _read_jsonl(PREDICTIONS) if item.get("status") == "pending"]
+    if not pending:
+        return {"ok": True, "compared": 0}
+    compared = 0
+    for item in pending:
+        name = str(item.get("entity") or "")
+        if not name or (name not in fact_text and entity not in fact_text and entity not in name):
+            continue
+        guess = str(item.get("guess") or "")
+        cosine = None
+        try:
+            a_blob = memory._embed(guess)
+            b_blob = memory._embed(fact_text)
+            if a_blob and b_blob:
+                a = struct.unpack("<768f", a_blob)
+                b = struct.unpack("<768f", b_blob)
+                cosine = round(max(0.0, min(1.0, sum(x * y for x, y in zip(a, b)))), 3)
+        except Exception:  # noqa: BLE001
+            pass
+        if cosine is None:
+            bigrams_a = {guess[i:i + 2] for i in range(max(0, len(guess) - 1))}
+            bigrams_b = {fact_text[i:i + 2] for i in range(max(0, len(fact_text) - 1))}
+            overlap = len(bigrams_a & bigrams_b) / max(1, len(bigrams_a) or 1)
+            cosine = round(overlap, 3)
+        reward = 1.0 if cosine >= 0.7 else (0.0 if cosine >= 0.45 else -1.0)
+        record = {"ts": time.time(), "entity": name, "guess": guess,
+                  "fact": fact_text[:200], "cosine": cosine,
+                  "verdict": "一致" if reward > 0 else ("部分一致" if reward == 0 else "幻觉"),
+                  "reward": reward}
+        _append_jsonl(HALLUCINATIONS, record)
+        item["status"] = "compared"
+        item["cosine"] = cosine
+        item["verdict"] = record["verdict"]
+        compared += 1
+    if compared:
+        lines = [json.dumps(item, ensure_ascii=False) for item in _read_jsonl(PREDICTIONS)]
+        try:
+            with open(PREDICTIONS, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + ("\n" if lines else ""))
+        except OSError:
+            pass
+    return {"ok": True, "compared": compared}
+
+
+def hallucination_stats():
+    items = _read_jsonl(HALLUCINATIONS)
+    total = len(items)
+    hits = len([item for item in items if item.get("reward", 0) > 0])
+    misses = len([item for item in items if item.get("reward", 0) < 0])
+    return {"total": total, "consistent": hits, "hallucinated": misses,
+            "accuracy": round(hits / total, 3) if total else None,
+            "recent": items[-10:]}
 
 
 def _load_curiosity():
@@ -4271,6 +4387,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, prune_preview(threshold))
         if path == "/api/metrics/uncertainty":
             return self._send(200, uncertainty_metrics())
+        if path == "/api/hallucination/stats":
+            return self._send(200, hallucination_stats())
+        if path == "/api/curiosity/predictions":
+            return self._send(200, {"items": _read_jsonl(PREDICTIONS)[-20:]})
         if path == "/api/curiosity/queue":
             return self._send(200, {"items": curiosity_queue()[:20]})
         if path == "/api/actions/recent":
@@ -5301,6 +5421,10 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
+        if path == "/api/curiosity/predict":
+            return self._send(200, curiosity_predict(str(body.get("entity") or ""),
+                                                     body.get("guess"),
+                                                     str(body.get("session") or "main")))
         if path == "/api/curiosity/scan":
             return self._send(200, curiosity_scan(str(body.get("text") or ""),
                                                   str(body.get("session") or "main")))
@@ -5331,6 +5455,10 @@ class Handler(BaseHTTPRequestHandler):
                            source="web", session="reading", person="owner")
             except Exception as error:  # noqa: BLE001
                 return self._send(200, {"ok": False, "reason": str(error)[:80]})
+            try:
+                compare_prediction(str(body.get("entity") or ""), text)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 curiosity_resolve(text)
             except Exception:  # noqa: BLE001
