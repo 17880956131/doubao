@@ -826,6 +826,12 @@ SYSTEM_DIGEST = DATA / "system_digest.json"
 
 
 def system_ingest(kind, text, source="client", payload=None):
+    recent = load_system_events(1)
+    if recent:
+        last = recent[-1]
+        if (last.get("kind") == str(kind)[:40] and last.get("text") == str(text)[:300]
+                and time.time() - float(last.get("ts") or 0) < 120):
+            return {"ok": True, "skipped": True, "reason": "120 秒内重复事件"}
     entry = {"ts": time.time(), "kind": str(kind)[:40], "text": str(text)[:300],
              "source": str(source)[:40], "data": payload or {}}
     try:

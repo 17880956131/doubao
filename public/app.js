@@ -906,7 +906,7 @@ const SCENES = {
     expr: 'neutral', gesture: 'sway', cooldown: 10 * 60000, speak: false,
     lines: { zh: '有人吗…我有点无聊。', ja: 'ねえ、誰かいる？ちょっと退屈。', en: "Anyone there? I'm a bit bored." },
   },
-  external: { expr: 'surprised', gesture: 'look', cooldown: 8000, speak: true, lines: { zh: '', ja: '', en: '' } },
+  external: { expr: 'surprised', gesture: 'look', cooldown: 8000, speak: false, lines: { zh: '', ja: '', en: '' } },
 }
 
 function reactScene(type, extra = {}) {
@@ -962,6 +962,8 @@ function setupPerception() {
       const data = await response.json()
       eventSeq = typeof data.seq === 'number' ? data.seq : eventSeq
       for (const event of data.events || []) {
+        const silentTypes = new Set(['system', 'shadow', 'body', 'perception', 'multimodal'])
+        if (silentTypes.has(event.type)) continue
         if (event.type === 'visual' && event.url) {
           const img = $('visual-overlay')
           if (img) {
@@ -984,7 +986,7 @@ function setupPerception() {
             }
           }
         }
-        reactScene(event.type || 'external', event)
+        if (SCENES[event.type]) reactScene(event.type, event)
       }
     } catch (err) { /* 下一轮再试 */ }
   }
@@ -1361,15 +1363,32 @@ async function reportSystem(kind, text) {
   } catch (err) { /* 忽略 */ }
 }
 
+const systemFlags = { network: null, charging: null, level: null, visibility: null, lastBeat: 0 }
+
 async function systemTick() {
   try {
+    const heartbeat = Date.now() - systemFlags.lastBeat > 10 * 60000
     const online = navigator.onLine
-    await reportSystem('network', online ? '网络在线' : '网络断开')
+    if (heartbeat || systemFlags.network !== online) {
+      systemFlags.network = online
+      await reportSystem('network', online ? '网络在线' : '网络断开')
+    }
     if (navigator.getBattery) {
       const battery = await navigator.getBattery()
-      await reportSystem('battery', `电量 ${Math.round(battery.level * 100)}%，${battery.charging ? '充电中' : '未充电'}`)
+      const level = Math.round(battery.level * 100)
+      const charging = !!battery.charging
+      if (heartbeat || systemFlags.charging !== charging || Math.abs((systemFlags.level || 0) - level) >= 5) {
+        systemFlags.charging = charging
+        systemFlags.level = level
+        await reportSystem('battery', `电量 ${level}%，${charging ? '充电中' : '未充电'}`)
+      }
     }
-    await reportSystem('visibility', document.visibilityState === 'visible' ? '页面在前台' : '页面在后台')
+    const visibility = document.visibilityState === 'visible'
+    if (heartbeat || systemFlags.visibility !== visibility) {
+      systemFlags.visibility = visibility
+      await reportSystem('visibility', visibility ? '页面在前台' : '页面在后台')
+    }
+    if (heartbeat) systemFlags.lastBeat = Date.now()
   } catch (err) { /* 忽略 */ }
 }
 setTimeout(systemTick, 8000)
