@@ -89,6 +89,19 @@
             "features"
           ],
           "presentation": "page"
+        },
+        {
+          "id": "thoughts",
+          "title": {
+            "zh": "她在想什么",
+            "en": "Thoughts"
+          },
+          "icon": "sparkle",
+          "placement": [
+            "session.tab",
+            "features"
+          ],
+          "presentation": "page"
         }
       ],
       "turn.note": [

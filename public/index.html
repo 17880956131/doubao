@@ -126,6 +126,12 @@
     </select></div>
     <button class="ghost" id="correct-btn">纠正她刚才的表现</button>
     <div class="field"><label><input type="checkbox" id="vision-loop"> 连续视觉（定时抓帧接入）</label></div>
+    <div class="field"><label>形象模型</label>
+      <select id="model-select">
+        <option value="hibiki">响（默认）</option>
+        <option value="senko">Senko（Cubism3）</option>
+      </select>
+    </div>
     <div class="field"><label>媒体测试</label>
       <div class="row" style="gap:6px;flex-wrap:wrap">
         <button id="test-mic">麦克风</button>
@@ -190,7 +196,8 @@
 <script src="./lib/cubism4core.min.js" onerror="__stageFail('cubism4-core')"></script>
 <script>
   (function () {
-    var runtime = new URLSearchParams(location.search).get('runtime') === 'cubism4' ? 'cubism4' : 'cubism2'
+    var runtime = new URLSearchParams(location.search).get('runtime')
+      || localStorage.getItem('stage.runtime') || 'cubism2'
     var s = document.createElement('script')
     s.src = './lib/' + runtime + '.min.js'
     s.onerror = function () { window.__stageFail(runtime) }

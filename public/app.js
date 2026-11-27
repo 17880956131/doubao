@@ -269,7 +269,9 @@ function loadExpressionList(settings) {
 }
 
 async function setupModel() {
-  const modelPath = new URLSearchParams(location.search).get('model') || 'models/hibiki/hibiki.model.json'
+  const modelPath = new URLSearchParams(location.search).get('model')
+    || localStorage.getItem('stage.model')
+    || 'models/hibiki/hibiki.model.json'
   modelBase = new URL('.', new URL(modelPath, location.href)).href
   // 模型动作可能自带语音（这个示例模型带的是日语音效），会和我们的中文 TTS 叠在一起，关掉
   if (PIXI.live2d && PIXI.live2d.config) PIXI.live2d.config.sound = false
@@ -1458,6 +1460,22 @@ async function testShot() {
     const data = await res.json()
     testOut(data.ok ? '已上传图片：' + (data.caption || '未识别') : '上传失败：' + (data.reason || ''))
   } catch (err) { testOut('拍照失败：' + String(err && err.message || err)) }
+}
+
+if ($('model-select')) {
+  const current = localStorage.getItem('stage.model') || ''
+  $('model-select').value = current.includes('senko') ? 'senko' : 'hibiki'
+  $('model-select').addEventListener('change', () => {
+    const choice = $('model-select').value
+    if (choice === 'senko') {
+      localStorage.setItem('stage.model', 'models/senko/senko.model3.json')
+      localStorage.setItem('stage.runtime', 'cubism4')
+    } else {
+      localStorage.removeItem('stage.model')
+      localStorage.setItem('stage.runtime', 'cubism2')
+    }
+    location.reload()
+  })
 }
 
 if ($('test-mic')) $('test-mic').addEventListener('click', testMic)

@@ -223,6 +223,62 @@ export function apply(ctx) {
       },
     })
 
+
+    ctx.dshGo.panel('thoughts', {
+      view: () => ({
+        type: 'stack',
+        title: '她在想什么',
+        children: [
+          { type: 'text', text: '语言侧：来源 / 提示长度 / 延迟', tone: 'muted' },
+          { type: 'keyValue', items: { $: 'data.language' } },
+          { type: 'text', text: '权重星球侧：犹豫程度 / 分歧 / 最高票', tone: 'muted' },
+          { type: 'keyValue', items: { $: 'data.layers' } },
+          { type: 'text', text: '最近几条轨迹', tone: 'muted' },
+          { type: 'list', items: { $: 'data.items' } },
+        ],
+      }),
+      data: (scope, emit) => {
+        let alive = true
+        const tick = async () => {
+          try {
+            const data = await api('/api/thoughts/recent')
+            const items = (data.items || []).slice(-6).reverse().map((item) => {
+              if (item.type === 'language') {
+                return { title: '语言 · ' + (item.source || '?'),
+                         subtitle: '提示 ' + item.prompt_len + ' 字 · ' + item.latency_ms + 'ms',
+                         trailing: item.expression || '—' }
+              }
+              return { title: '层 · 熵 ' + (item.entropy == null ? '—' : item.entropy),
+                       subtitle: '分歧 ' + (item.disagreement == null ? '—' : item.disagreement) + ' · ' + (item.text || ''),
+                       trailing: item.top || '—' }
+            })
+            const language = (data.items || []).filter((item) => item.type === 'language').slice(-1)[0] || {}
+            const layers = (data.items || []).filter((item) => item.type === 'layers').slice(-1)[0] || {}
+            if (alive) emit({
+              items,
+              language: [
+                ['来源', language.source || '—'],
+                ['提示长度', language.prompt_len == null ? '—' : language.prompt_len],
+                ['延迟', language.latency_ms == null ? '—' : language.latency_ms + ' ms'],
+                ['表情', language.expression || '—'],
+              ],
+              layers: [
+                ['熵', layers.entropy == null ? '—' : layers.entropy],
+                ['分歧', layers.disagreement == null ? '—' : layers.disagreement],
+                ['最高票', layers.top || '—'],
+                ['层数', layers.layer_count == null ? '—' : layers.layer_count],
+              ],
+            })
+          } catch (error) {
+            if (alive) emit({ items: [{ title: '豆宝没醒', subtitle: '先点唤醒' }],
+                              language: [['状态', '—']], layers: [['状态', '—']] })
+          }
+        }
+        const cancel = schedule('status_refresh_ms', tick)
+        return () => { alive = false; cancel() }
+      },
+    })
+
     // 成长面板：基准分曲线 + 时代层/巩固次数
     ctx.dshGo.panel('growth', {
       view: (scope, caps) => ({

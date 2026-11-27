@@ -555,6 +555,28 @@ MM_DIR = DATA / "media"
 SYSTEM_EVENTS = DATA / "system_events.jsonl"
 SELF_CORE = DATA / "self_core.json"
 IMAGINATION_LOG = DATA / "imagination.jsonl"
+THOUGHT_LOG = DATA / "thought_trace.jsonl"
+
+
+def record_thought(entry):
+    entry = dict(entry or {})
+    entry.setdefault("ts", time.time())
+    try:
+        with open(THOUGHT_LOG, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def thought_entropy(probs):
+    try:
+        values = list(probs.values()) if isinstance(probs, dict) else list(probs)
+        total = sum(values) or 1.0
+        values = [max(0.0, float(v) / total) for v in values]
+        import math as _math
+        return round(-sum(v * _math.log(v + 1e-9) for v in values) / _math.log(len(values) or 2), 3)
+    except Exception:  # noqa: BLE001
+        return None
 IMAGINATION_STATE = DATA / "imagination_state.json"
 
 
@@ -1175,6 +1197,37 @@ def orchestrate(payload):
     try:
         record_inference(content, parsed, "orchestrate", latency, state)
         bump_inference(1)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import hashlib as _hash
+        record_thought({
+            "type": "language",
+            "source": source,
+            "prompt_digest": _hash.sha1((system + content).encode("utf-8")).hexdigest()[:12],
+            "prompt_len": len(system) + len(content),
+            "reply_len": len(str(parsed.get("text") or "")),
+            "latency_ms": latency,
+            "reply_digest": _hash.sha1(str(parsed.get("text") or "").encode("utf-8")).hexdigest()[:12],
+            "expression": expression,
+        })
+        try:
+            prediction = layers.predict(state.get("expression") or "neutral",
+                                        state.get("gesture") or "", False,
+                                        state.get("params") or {},
+                                        state.get("mood") or mood.label(), text=content)
+            if prediction:
+                probs = prediction.get("expr_probs")
+                record_thought({
+                    "type": "layers",
+                    "entropy": thought_entropy(probs),
+                    "disagreement": prediction.get("disagreement"),
+                    "top": prediction.get("expression"),
+                    "layer_count": len(prediction.get("layers") or []),
+                    "text": content[:80],
+                })
+        except Exception:  # noqa: BLE001
+            pass
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -3779,6 +3832,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, "not found", "text/plain; charset=utf-8")
             content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
             return self._send(200, target.read_bytes(), content_type)
+        if path == "/api/thoughts/recent":
+            items = []
+            try:
+                with open(THOUGHT_LOG, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if line:
+                            try:
+                                items.append(json.loads(line))
+                            except ValueError:
+                                continue
+            except OSError:
+                pass
+            return self._send(200, {"count": len(items), "items": items[-20:]})
         if path == "/api/strata/eras":
             groups = {}
             for bucket, meta in layers.meta.items():
@@ -4729,6 +4796,31 @@ class Handler(BaseHTTPRequestHandler):
                 if layers.online_step(row):
                     done += 1
             return self._send(200, {"ok": True, "steps": done, **layers.living_status()})
+        if path == "/api/thoughts/probe":
+            text = str(body.get("text") or "").strip()
+            if not text:
+                return self._send(200, {"ok": False, "reason": "没有输入"})
+            if not local_brain_ok():
+                return self._send(200, {"ok": False, "reason": "本地模型不在线"})
+            samples = []
+            for index in range(3):
+                try:
+                    raw = openai_chat("http://127.0.0.1:8181/v1", "", "r1-1.5b", text, [], "zh",
+                                      system=self_core_text() + "\n只输出一句话，不超过30字。",
+                                      timeout=60)
+                    parsed_probe = parse_reply(raw)
+                    answer = str(parsed_probe.get("text") or "").strip()
+                    if answer:
+                        samples.append(answer[:60])
+                except Exception:  # noqa: BLE001
+                    continue
+            distinct = len(set(samples))
+            record_thought({"type": "language_candidates", "text": text[:80],
+                            "samples": samples, "distinct": distinct,
+                            "note": "3 次采样，近似看它有多少种说法"})
+            return self._send(200, {"ok": True, "samples": samples,
+                                    "distinct": distinct,
+                                    "note": "不是概率，只是多次采样的多样性"})
         if path == "/api/body/say":
             return self._send(200, body_say(body.get("text") or body.get("content") or "",
                                             body.get("expression") or None,
