@@ -1562,6 +1562,16 @@ function stopEnvPerception() {
   setEnvStatus('已关闭')
 }
 
+if ($('env-quick')) {
+  $('env-quick').addEventListener('click', async () => {
+    const box = $('env-perception')
+    if (!box) return
+    box.checked = !box.checked
+    box.dispatchEvent(new Event('change'))
+    addBubble('系统', box.checked ? '环境感知已开启（摄像头）' : '环境感知已关闭')
+  })
+}
+
 if ($('env-perception')) {
   const savedEnv = localStorage.getItem('zhiming.envPerception') === '1'
   $('env-perception').checked = savedEnv
