@@ -38,6 +38,33 @@ def text_features(text):
 _TUNABLES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tunables.json")
 _tunables_cache = {"mtime": 0.0, "values": {}}
 _TRANSMISSION_CACHE = {"mtime": 0.0, "value": 0.15}
+_TEMPERATURE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "temperature.json")
+_TEMPERATURE_CACHE = {"mtime": 0.0, "value": 1.0}
+
+
+def _ensemble_temperature():
+    try:
+        stat = os.stat(_TEMPERATURE_PATH)
+        if stat.st_mtime != _TEMPERATURE_CACHE["mtime"]:
+            with open(_TEMPERATURE_PATH, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            _TEMPERATURE_CACHE["value"] = max(0.2, min(8.0, float(data.get("temperature") or 1.0)))
+            _TEMPERATURE_CACHE["mtime"] = stat.st_mtime
+    except (OSError, ValueError):
+        pass
+    return float(_TEMPERATURE_CACHE["value"])
+
+
+def _temperature_scale(probs, temperature=None):
+    t = temperature or _ensemble_temperature()
+    if t <= 1.0 + 1e-6 and t >= 1.0 - 1e-6:
+        return probs
+    safe = np.clip(probs, 1e-9, 1.0)
+    logits = np.log(safe) / t
+    logits -= logits.max(axis=1, keepdims=True)
+    scaled = np.exp(logits)
+    scaled /= scaled.sum(axis=1, keepdims=True)
+    return scaled
 
 
 def _layer_transmission():
@@ -528,6 +555,8 @@ class LayerModelManager:
                 probs_expr += probs * weight
             probs_expr /= total_weight
             probs_gest /= total_weight
+            probs_expr = _temperature_scale(np.asarray(probs_expr).reshape(1, -1))[0]
+            GEST = None
             votes = {}
             for item in per_layer:
                 votes[item["expression"]] = votes.get(item["expression"], 0) + 1
@@ -747,6 +776,181 @@ class LayerModelManager:
                 except OSError:
                     pass
         return {"ok": True, "samples": int(X.shape[0]), "layers": stats}
+
+    def ensure_living_layer(self):
+        """活层：唯一在运行时持续更新的层；同一图里前向+反向。"""
+        with self.lock:
+            for bucket, meta in self.meta.items():
+                if meta.get("kind") == "living" and not meta.get("fossil") and not meta.get("rejected"):
+                    if bucket in self.models:
+                        return bucket
+            bucket = int(time.time() * 1000)
+            dim = FEATURE_DIM + TEXT_DIM
+            self.models[bucket] = {
+                "w_expr": np.zeros((dim, len(EXPRESSIONS)), dtype=np.float32),
+                "b_expr": np.zeros(len(EXPRESSIONS), dtype=np.float32),
+                "w_gest": np.zeros((dim, len(GESTURES)), dtype=np.float32),
+                "b_gest": np.zeros(len(GESTURES), dtype=np.float32),
+            }
+            self.meta[bucket] = {
+                "bucket": bucket, "label": "活层 " + time.strftime("%H:%M:%S"),
+                "kind": "living", "granularity": "living", "frozen": False,
+                "living": True, "samples": 0, "weight": 0.15, "adapted_weight": 0.15,
+                "feature_centroid": [0.0] * dim,
+                "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self._save_layer(bucket, self.meta[bucket])
+            return bucket
+
+    def online_step(self, row, lr=0.02):
+        """单样本在线 SGD：同一张图前向算概率、反向更新权重。"""
+        bucket = self.ensure_living_layer()
+        X, y_expr, y_gest, _ = self._features([row])
+        if X.shape[0] == 0:
+            return None
+        with self.lock:
+            model = self.models[bucket]
+            x = X[0]
+            logits = x @ model["w_expr"] + model["b_expr"]
+            probs = np.exp(logits - logits.max())
+            probs = probs / probs.sum()
+            target = int(y_expr[0])
+            loss = float(-np.log(max(probs[target], 1e-9)))
+            grad = probs.copy()
+            grad[target] -= 1.0
+            model["w_expr"] -= lr * np.outer(x, grad)
+            model["b_expr"] -= lr * grad
+            glogits = x @ model["w_gest"] + model["b_gest"]
+            gprobs = np.exp(glogits - glogits.max())
+            gprobs = gprobs / gprobs.sum()
+            gtarget = int(y_gest[0])
+            glosst = float(-np.log(max(gprobs[gtarget], 1e-9)))
+            ggrad = gprobs.copy()
+            ggrad[gtarget] -= 1.0
+            model["w_gest"] -= lr * np.outer(x, ggrad)
+            model["b_gest"] -= lr * ggrad
+            meta = self.meta[bucket]
+            meta["samples"] = int(meta.get("samples") or 0) + 1
+            meta["last_loss"] = round(loss, 4)
+            meta["living"] = True
+            self.meta[bucket] = meta
+            self._save_layer(bucket, meta)
+        return {"ok": True, "loss": round(loss, 4), "gesture_loss": round(glosst, 4),
+                "samples": meta["samples"]}
+
+    def cool_living(self, factor=0.5):
+        """睡眠时给活层降温：权重衰减、计数归零，保留结构。"""
+        for bucket, meta in self.meta.items():
+            if meta.get("kind") == "living" and not meta.get("fossil") and not meta.get("rejected"):
+                model = self.models.get(bucket)
+                if model:
+                    model["w_expr"] *= factor
+                    model["w_gest"] *= factor
+                    model["b_expr"] *= factor
+                    model["b_gest"] *= factor
+                meta["samples"] = 0
+                meta["last_loss"] = None
+                meta["cooled_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                meta["cool_factor"] = factor
+                self.meta[bucket] = meta
+                self._save_layer(bucket, meta)
+                return True
+        return False
+
+    def living_status(self):
+        for bucket, meta in self.meta.items():
+            if meta.get("kind") == "living" and not meta.get("fossil") and not meta.get("rejected"):
+                model = self.models.get(bucket)
+                return {"layer": meta.get("label"), "samples": meta.get("samples", 0),
+                        "last_loss": meta.get("last_loss"),
+                        "weight_norm": round(float(np.abs(model["w_expr"]).mean()), 5) if model else None}
+        return {"layer": None, "samples": 0, "last_loss": None, "weight_norm": None}
+
+    def ensemble_matrix(self, rows):
+        """整批状态的集成概率（带层权重），供校准与截面复用。"""
+        X, y_expr, _y_gest, _w = self._features(rows)
+        if X.shape[0] == 0:
+            return None, None
+        params = _ensemble_params()
+        blend = np.zeros((X.shape[0], len(EXPRESSIONS)), dtype=np.float64)
+        total = 0.0
+        with self.lock:
+            for bucket, model in self.models.items():
+                meta = self.meta.get(bucket, {})
+                if meta.get("rejected") or meta.get("fossil") or (meta.get("semantic") or {}).get("stale"):
+                    continue
+                width = int(model["w_expr"].shape[0])
+                xi = X[:, :width]
+                logits = xi @ model["w_expr"] + model["b_expr"]
+                logits -= logits.max(axis=1, keepdims=True)
+                probs = np.exp(logits)
+                probs /= probs.sum(axis=1, keepdims=True)
+                base = max(float(meta.get("adapted_weight") or meta.get("weight") or 0.1), 1e-6)
+                weight = (base ** params["weight_power"]) * (max(meta.get("samples", 1), 1) ** params["sample_power"])
+                blend += probs * weight
+                total += weight
+        if total <= 0:
+            return None, None
+        return blend / total, np.asarray(y_expr)
+
+    @staticmethod
+    def calibration_error(probs, y, bins=5):
+        conf = probs.max(axis=1)
+        pred = probs.argmax(axis=1)
+        correct = (pred == y).astype(np.float64)
+        ece = 0.0
+        for lo in np.linspace(0.0, 1.0, bins + 1)[:-1]:
+            hi = lo + 1.0 / bins
+            mask = (conf >= lo) & (conf < hi if hi < 1.0 else conf <= hi)
+            count = int(mask.sum())
+            if count:
+                ece += count / len(conf) * abs(float(correct[mask].mean()) - float(conf[mask].mean()))
+        nll = float(-np.mean(np.log(np.clip(probs[np.arange(len(y)), y], 1e-9, 1.0))))
+        return round(ece, 4), round(nll, 4)
+
+    def calibrate_temperature(self, rows, holdout_ratio=0.3):
+        probs, y = self.ensemble_matrix(rows)
+        if probs is None or len(probs) < 12:
+            return {"ok": False, "reason": "样本不足"}
+        split = max(8, int(len(probs) * (1 - holdout_ratio)))
+        train_p, train_y = probs[:split], y[:split]
+        test_p, test_y = probs[split:], y[split:]
+        if len(test_p) < 4:
+            test_p, test_y = train_p, train_y
+        best_t, best_nll = 1.0, float("inf")
+        for t in np.linspace(0.3, 5.0, 95):
+            scaled = _temperature_scale(train_p, float(t))
+            nll = float(-np.mean(np.log(np.clip(scaled[np.arange(len(train_y)), train_y], 1e-9, 1.0))))
+            if nll < best_nll:
+                best_nll, best_t = nll, float(t)
+        before_ece, before_nll = self.calibration_error(test_p, test_y)
+        after_probs = _temperature_scale(test_p, best_t)
+        after_ece, after_nll = self.calibration_error(after_probs, test_y)
+        accepted = (after_nll <= before_nll) and (after_ece <= before_ece + 0.01)
+        payload = {
+            "temperature": round(best_t, 3) if accepted else 1.0,
+            "fitted_temperature": round(best_t, 3),
+            "accepted": accepted,
+            "fitted_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "samples": int(len(probs)),
+            "holdout": int(len(test_p)),
+            "before": {"ece": before_ece, "nll": before_nll},
+            "after": {"ece": after_ece, "nll": after_nll},
+        }
+        try:
+            with open(_TEMPERATURE_PATH, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+        except OSError:
+            pass
+        _TEMPERATURE_CACHE["mtime"] = 0.0
+        return {"ok": True, **payload}
+
+    def temperature_status(self):
+        try:
+            with open(_TEMPERATURE_PATH, "r", encoding="utf-8") as handle:
+                return {"ok": True, **json.load(handle)}
+        except (OSError, ValueError):
+            return {"ok": True, "temperature": 1.0, "fitted_at": None}
 
     def evaluate_holdout(self, bucket, limit=60):
         """在最近一段数据上评估某层准确率（用于后代接受/拒绝）。"""

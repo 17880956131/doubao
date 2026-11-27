@@ -39,6 +39,8 @@ DEFAULTS = {
     "thermal_solid_point": 0.35,
     "layer_transmission": 0.15,
     "system_adb_enabled": False,
+    "living_sleep_steps": 40,
+    "living_cool_factor": 0.5,
     "settle_w_credit": 0.15,
     "credit_low_threshold": 0.3,
 }

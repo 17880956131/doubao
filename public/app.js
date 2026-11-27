@@ -958,7 +958,10 @@ function setupPerception() {
       if (!response.ok) return
       const data = await response.json()
       eventSeq = typeof data.seq === 'number' ? data.seq : eventSeq
-      for (const event of data.events || []) reactScene(event.type || 'external', event)
+      for (const event of data.events || []) {
+        if (event.type === 'imagination' && event.text) addBubble('豆宝（想象）', event.text)
+        reactScene(event.type || 'external', event)
+      }
     } catch (err) { /* 下一轮再试 */ }
   }
   pollEvents()

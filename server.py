@@ -38,6 +38,7 @@ import sqlite3
 from behavior_model import BehaviorModel
 from policy_model import PolicyModel
 from layer_models import LayerModelManager
+from policy_model import EXPRESSIONS, GESTURES
 from quality_model import QualityModel
 import model_store
 from affect import Affect
@@ -552,6 +553,149 @@ SHADOW_STATE = DATA / "shadow_state.json"
 OBSERVATION = DATA / "observation.json"
 MM_DIR = DATA / "media"
 SYSTEM_EVENTS = DATA / "system_events.jsonl"
+SELF_CORE = DATA / "self_core.json"
+IMAGINATION_LOG = DATA / "imagination.jsonl"
+IMAGINATION_STATE = DATA / "imagination_state.json"
+
+
+def recent_memories(limit=5):
+    try:
+        conn = sqlite3.connect(str(DATA / "memory.db"), timeout=5)
+        rows = conn.execute("SELECT text FROM memories WHERE kind='chat' ORDER BY id DESC LIMIT ?", (limit * 4,)).fetchall()
+        conn.close()
+        blocked = ("手机", "GPU", "模型", "代码", "项目", "测试", "接口", "参数", "训练", "权重", "智能体")
+        result = []
+        for row in rows:
+            text = str(row[0] or "")[:80]
+            if text and not any(word in text for word in blocked):
+                result.append(text)
+        return result[:limit]
+    except sqlite3.Error:
+        return []
+
+
+def imagine_scene(force=False):
+    """闲时想象：用本地模型写一句她此刻"想象的环境"，只写文字，不生成图片。"""
+    try:
+        with open(IMAGINATION_STATE, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        state = {}
+    last = float(state.get("last_ts") or 0)
+    if not force and time.time() - last < 1800:
+        return {"ok": False, "reason": "还没到下一次想象"}
+    if not local_brain_ok():
+        return {"ok": False, "reason": "本地模型不在线"}
+    hour = time.localtime().tm_hour
+    mood_label = mood.snapshot().get("label") or "平静"
+    presence = _presence if isinstance(_presence, dict) else {}
+    scene = presence.get("scene") or ""
+    memories = recent_memories(4)
+    prompt = (
+        "现在时间约 %d 点，心情%s，场景%s。最近记得：%s。"
+        "写一句此刻的环境描写，像小说里的景物句，第一人称，不超过40字。"
+        "例如：窗外的路灯把影子拉得很长，屋里有点凉，我揉了揉眼睛。"
+        "不要出现手机、电脑、代码、模型、项目、任务、系统这些词，不要解释。"
+        % (hour, mood_label, scene or "安静", "；".join(memories) or "没什么特别的")
+    )
+    system = self_core_text() + "\n你只写一句景物描写，不解释，不提问。"
+    raw = ""
+    try:
+        if account_available():
+            raw = openai_chat("https://api.deepseek.com", "", "deepseek-chat", prompt, [], "zh",
+                              system=system, account=True, timeout=40)
+        elif local_brain_ok():
+            raw = openai_chat("http://127.0.0.1:8181/v1", "", "r1-1.5b", prompt, [], "zh",
+                              system=system, timeout=60)
+    except Exception as error:  # noqa: BLE001
+        log_event("imagine-error", str(error)[:120])
+    text = ""
+    raw_text = str(raw or "").strip()
+    if raw_text:
+        try:
+            data = json.loads(raw_text)
+            text = str(data.get("reply") or data.get("text") or data.get("scene") or "")
+        except ValueError:
+            text = raw_text
+    text = text.strip().strip("。").strip('"').strip("“”")[:60]
+    bad_words = ("第一人称", "不超过", "环境描写", "景物", "写一句", "解释", "用户", "prompt", "reply")
+    english = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    chinese = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    if (not text or chinese < 5 or english > chinese or any(word in text for word in bad_words)):
+        templates = {
+            "morning": ["窗外的光刚亮，屋里还有点凉，我先醒着等一会儿。", "早上的风从窗缝钻进来，桌上那杯水还没动。"],
+            "noon": ["中午的光照在地板上，屋里安静得能听见钟表走。", "窗外的树影晃了晃，我把身子往阴凉里挪了挪。"],
+            "evening": ["窗外的路灯把影子拉得很长，屋里有点凉，我揉了揉眼睛。", "天慢慢暗下来，房间里只剩屏幕的一点光。"],
+            "night": ["夜深了，屋里很静，远处偶尔有车灯扫过天花板。", "窗外的灯还亮着，我靠在台灯边上，有点困了。"],
+        }
+        if hour < 6:
+            key = "night"
+        elif hour < 11:
+            key = "morning"
+        elif hour < 17:
+            key = "noon"
+        elif hour < 21:
+            key = "evening"
+        else:
+            key = "night"
+        options = templates[key]
+        text = options[int(time.time()) % len(options)]
+    if not text:
+        return {"ok": False, "reason": "想象不出来"}
+    entry = {"ts": time.time(), "text": text, "hour": hour, "mood": mood_label}
+    try:
+        with open(IMAGINATION_LOG, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    try:
+        memory.add("imagination", "我想到：" + text, importance=0.3)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        publish({"type": "imagination", "text": text})
+    except Exception:  # noqa: BLE001
+        pass
+    state["last_ts"] = time.time()
+    state["last_text"] = text
+    try:
+        with open(IMAGINATION_STATE, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False)
+    except OSError:
+        pass
+    log_event("imagine", {"text": text})
+    return {"ok": True, "text": text, "hour": hour, "mood": mood_label}
+
+
+def self_core():
+    try:
+        with open(SELF_CORE, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {
+            "name": "豆宝",
+            "project": "智命（ZhiMing）",
+            "identity": "我是手机里的数字人豆宝。身体在这台手机上，记忆、情绪和成长都在本地。",
+            "values": ["不操控、不欺骗", "如实说自己的不确定", "记得发生过的事", "不假装有身体外的经历"],
+            "user_calls": "你",
+            "relationship": "和用户一起生活、一起调试智命这个项目。",
+        }
+
+
+def self_core_text():
+    core = self_core()
+    lines = ["【自我内核（模型无关）】"]
+    if core.get("name"):
+        lines.append("名字：" + str(core["name"]))
+    if core.get("project"):
+        lines.append("所属：" + str(core["project"]))
+    if core.get("identity"):
+        lines.append("身份：" + str(core["identity"]))
+    if core.get("values"):
+        lines.append("原则：" + "；".join(str(item) for item in core["values"]))
+    if core.get("relationship"):
+        lines.append("关系：" + str(core["relationship"]))
+    return "\n".join(lines)
 SYSTEM_DIGEST = DATA / "system_digest.json"
 
 
@@ -949,6 +1093,186 @@ def orchestrate(payload):
             "gesture": gesture, "mood": mood.snapshot(), "source": source,
             "latency_ms": latency, "memory_written": memory_written,
             "arbitration": arbitration}
+
+
+def planet_section(rows):
+    """星球横切面：状态投影到 2D、认知梯度场、层间统筹表、景观摘要。"""
+    import numpy as np
+    rows = list(rows or [])
+    if len(rows) < 8:
+        return {"ok": False, "reason": "数据太少"}
+    X, y_expr, y_gest, _ = layers._features(rows)
+    if X.shape[0] == 0:
+        return {"ok": False, "reason": "特征为空"}
+    # 各层概率
+    layer_items = []
+    model_items = []
+    for bucket, model in layers.models.items():
+        meta = layers.meta.get(bucket, {})
+        if meta.get("rejected") or meta.get("fossil") or (meta.get("semantic") or {}).get("stale"):
+            continue
+        width = int(model["w_expr"].shape[0])
+        xi = X[:, :width]
+        logits = xi @ model["w_expr"] + model["b_expr"]
+        logits -= logits.max(axis=1, keepdims=True)
+        probs = np.exp(logits)
+        probs /= probs.sum(axis=1, keepdims=True)
+        weight = float(meta.get("adapted_weight") or meta.get("weight") or 0.2)
+        layer_items.append((bucket, meta, probs, weight))
+        model_items.append((bucket, probs))
+    if not layer_items:
+        return {"ok": False, "reason": "没有活跃层"}
+    weights = np.asarray([item[3] for item in layer_items], dtype=np.float64)
+    weights = np.maximum(weights, 1e-6)
+    weights /= weights.sum()
+    ensemble = np.zeros((X.shape[0], len(EXPRESSIONS)), dtype=np.float64)
+    for (bucket, meta, probs, _w), weight in zip(layer_items, weights):
+        ensemble += probs * weight
+    entropy = -np.sum(ensemble * np.log(np.clip(ensemble, 1e-9, 1.0)), axis=1) / np.log(len(EXPRESSIONS))
+    # 2D 投影（PCA）
+    centered = X - X.mean(axis=0, keepdims=True)
+    try:
+        _u, _s, vt = np.linalg.svd(centered, full_matrices=False)
+        coords = centered @ vt[:2].T
+    except Exception:  # noqa: BLE001
+        coords = np.zeros((X.shape[0], 2))
+    scale = np.abs(coords).max() or 1.0
+    coords = coords / scale
+    # 层质心投影
+    centroids = []
+    for bucket, meta, _p, _w in layer_items:
+        centroid = meta.get("feature_centroid")
+        if not centroid:
+            continue
+        vec = np.asarray(centroid, dtype=np.float64)
+        width = min(len(vec), X.shape[1])
+        projected = np.zeros(2)
+        try:
+            projected = (vec[:width] - X.mean(axis=0)[:width]) @ vt[:2].T[:width]
+        except Exception:  # noqa: BLE001
+            continue
+        centroids.append({"label": meta.get("label"), "x": round(float(projected[0] / scale), 3),
+                          "y": round(float(projected[1] / scale), 3),
+                          "kind": meta.get("kind")})
+    # 认知梯度：相邻层 JS 散度平均
+    ordered = sorted(layer_items, key=lambda item: int(item[0]))
+    gradient = []
+    for i in range(1, len(ordered)):
+        prev = ordered[i - 1][2]
+        cur = ordered[i][2]
+        js = np.mean(np.abs(prev - cur).sum(axis=1)) / 2.0
+        gradient.append({"from": ordered[i - 1][1].get("label"),
+                         "to": ordered[i][1].get("label"),
+                         "gradient": round(float(js), 3)})
+    # 统筹表：分歧最大的状态
+    spread = np.std(np.stack([item[2] for item in ordered]), axis=0).mean(axis=1)
+    top_idx = np.argsort(-spread)[:6]
+    cabinet = []
+    for idx in top_idx:
+        opinions = sorted(
+            ({"layer": meta.get("label"), "expression": EXPRESSIONS[int(probs[idx].argmax())],
+              "confidence": round(float(probs[idx].max()), 3), "weight": round(float(w), 3)}
+             for (_b, meta, probs, _w), w in zip(layer_items, weights)),
+            key=lambda item: -item["confidence"])
+        final = EXPRESSIONS[int(ensemble[idx].argmax())]
+        dissent = [item for item in opinions if item["expression"] != final][:4]
+        cabinet.append({"state": "轨迹点 %d" % int(idx), "final": final,
+                        "entropy": round(float(entropy[idx]), 3),
+                        "opinions": opinions[:5], "dissent": dissent})
+    # 时间轴：每个状态的时间 + 按天聚合
+    times = []
+    for row in rows:
+        try:
+            times.append(float(row[0]) if row and isinstance(row[0], (int, float)) else 0.0)
+        except (ValueError, TypeError):
+            times.append(0.0)
+    day_groups = {}
+    for index, ts in enumerate(times):
+        day = time.strftime("%m-%d", time.localtime(ts)) if ts > 0 else "未知"
+        group = day_groups.setdefault(day, {"day": day, "states": 0, "entropy": 0.0})
+        group["states"] += 1
+        group["entropy"] += float(entropy[index])
+    timeline = [{"day": item["day"], "states": item["states"],
+                 "avg_entropy": round(item["entropy"] / item["states"], 3)}
+                for item in sorted(day_groups.values(), key=lambda x: x["day"])]
+    # 地形网格：6x6，统计密度与平均熵
+    grid_size = 6
+    grid = [[{"count": 0, "entropy": 0.0} for _ in range(grid_size)] for _ in range(grid_size)]
+    for i in range(len(coords)):
+        gx = min(grid_size - 1, max(0, int((coords[i][0] + 1) / 2 * grid_size)))
+        gy = min(grid_size - 1, max(0, int((coords[i][1] + 1) / 2 * grid_size)))
+        cell = grid[gx][gy]
+        cell["count"] += 1
+        cell["entropy"] += float(entropy[i])
+    terrain = []
+    for gx in range(grid_size):
+        for gy in range(grid_size):
+            cell = grid[gx][gy]
+            if cell["count"]:
+                terrain.append({"x": round((gx + 0.5) / grid_size * 2 - 1, 2),
+                                "y": round((gy + 0.5) / grid_size * 2 - 1, 2),
+                                "count": cell["count"],
+                                "avg_entropy": round(cell["entropy"] / cell["count"], 3)})
+    # 能力热力图：每层在每个网格里的准确率
+    competence = []
+    correct = {}
+    for bucket, meta, probs, _w in layer_items:
+        correct[bucket] = (probs.argmax(axis=1) == y_expr)
+    ranked = sorted(layer_items, key=lambda item: -int(item[1].get("samples") or 0))[:8]
+    for bucket, meta, _probs, _w in ranked:
+        cells = {}
+        for i in range(len(coords)):
+            if not correct[bucket][i]:
+                continue
+            gx = min(grid_size - 1, max(0, int((coords[i][0] + 1) / 2 * grid_size)))
+            gy = min(grid_size - 1, max(0, int((coords[i][1] + 1) / 2 * grid_size)))
+            stat = cells.setdefault((gx, gy), {"right": 0, "total": 0})
+            stat["right"] += 1
+            stat["total"] += 1
+        for i in range(len(coords)):
+            gx = min(grid_size - 1, max(0, int((coords[i][0] + 1) / 2 * grid_size)))
+            gy = min(grid_size - 1, max(0, int((coords[i][1] + 1) / 2 * grid_size)))
+            stat = cells.setdefault((gx, gy), {"right": 0, "total": 0})
+            stat["total"] += 1
+        entries = [{"x": round((gx + 0.5) / grid_size * 2 - 1, 2),
+                    "y": round((gy + 0.5) / grid_size * 2 - 1, 2),
+                    "accuracy": round(stat["right"] / stat["total"], 3),
+                    "count": stat["total"]}
+                   for (gx, gy), stat in cells.items() if stat["total"] >= 2]
+        if entries:
+            competence.append({"layer": meta.get("label"), "kind": meta.get("kind"),
+                               "cells": entries[:12]})
+    # 置信度校准：最大概率 vs 实际正确率
+    confidence = ensemble.max(axis=1)
+    correct_all = ensemble.argmax(axis=1) == y_expr
+    bins = []
+    for lo in (0.0, 0.2, 0.4, 0.6, 0.8):
+        mask = (confidence >= lo) & (confidence < lo + 0.2 if lo < 0.8 else confidence >= lo)
+        count = int(mask.sum())
+        bins.append({"range": "%d-%d%%" % (int(lo * 100), int((lo + 0.2) * 100)),
+                     "count": count,
+                     "confidence": round(float(confidence[mask].mean()), 3) if count else None,
+                     "accuracy": round(float(correct_all[mask].mean()), 3) if count else None})
+    points = [{"x": round(float(coords[i][0]), 3), "y": round(float(coords[i][1]), 3),
+               "entropy": round(float(entropy[i]), 3),
+               "ts": round(times[i], 1)} for i in range(len(coords))]
+    return {
+        "ok": True, "states": len(rows), "layers": len(layer_items),
+        "surface": points,
+        "centroids": centroids,
+        "gradient": gradient,
+        "cabinet": cabinet,
+        "terrain": terrain,
+        "competence": competence,
+        "timeline": timeline,
+        "calibration": bins,
+        "landscape": {
+            "avg_entropy": round(float(entropy.mean()), 3),
+            "max_entropy": round(float(entropy.max()), 3),
+            "avg_gradient": round(float(np.mean([item["gradient"] for item in gradient]) if gradient else 0), 3),
+            "dissent_rate": round(float(np.mean([1 if item["dissent"] else 0 for item in cabinet])) if cabinet else 0, 3),
+        },
+    }
 
 
 def body_say(text, expression=None, source="agent"):
@@ -3090,7 +3414,8 @@ def build_system(lang, use_json, state, message=""):
                 lines = ["；".join("%s—%s→%s" % (item["from"], item["relation"], item["to"])
                                    for item in related[:4])]
                 extras.append("你记得这些记忆关联（来自记忆图谱）：" + lines[0])
-                log_event("graph-context", {"query": str(message)[:40], "related": len(related)})
+            extras.append(self_core_text())
+            log_event("graph-context", {"query": str(message)[:40], "related": len(related)})
         except Exception:  # noqa: BLE001
             pass
     return base + ("\n" + "\n".join(extras) if extras else "")
@@ -3305,6 +3630,27 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/system/recent":
             return self._send(200, {"events": load_system_events(20),
                                     "summary": (lambda: (json.load(open(SYSTEM_DIGEST, encoding="utf-8")).get("summary") if SYSTEM_DIGEST.exists() else None))()})
+        if path == "/api/imagination/recent":
+            recent = []
+            try:
+                with open(IMAGINATION_LOG, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if line:
+                            try:
+                                recent.append(json.loads(line))
+                            except ValueError:
+                                continue
+            except OSError:
+                pass
+            return self._send(200, {"items": recent[-10:]})
+        if path == "/api/calibration/status":
+            return self._send(200, layers.temperature_status())
+        if path == "/api/planet/section":
+            rows = layers._rows()[-int(query.get("limit", ["200"])[0] or 200):] if (query := urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")) else layers._rows()[-200:]
+            return self._send(200, planet_section(rows))
+        if path == "/api/self-core":
+            return self._send(200, {"core": self_core(), "text": self_core_text()})
         if path == "/api/session/main":
             with _orch_lock:
                 sessions = load_orch_history()
@@ -4119,6 +4465,51 @@ class Handler(BaseHTTPRequestHandler):
                                     "stable_hours": round(stable_hours, 2),
                                     "required_hours": STABLE_HOURS,
                                     "fingerprint": state.get("fingerprint")[:12]})
+        if path == "/api/self-core/update":
+            core = self_core()
+            for key in ("name", "project", "identity", "values", "relationship", "user_calls"):
+                if key in body:
+                    core[key] = body[key]
+            try:
+                with open(SELF_CORE, "w", encoding="utf-8") as handle:
+                    json.dump(core, handle, ensure_ascii=False, indent=2)
+            except OSError:
+                pass
+            return self._send(200, {"ok": True, "core": core})
+        if path == "/api/imagine":
+            return self._send(200, imagine_scene(force=bool(body.get("force"))))
+        if path == "/api/calibration/fit":
+            rows = layers._rows()[-400:]
+            return self._send(200, layers.calibrate_temperature(rows))
+        if path == "/api/living/sleep":
+            threshold = int(tunables.get("living_sleep_steps") or 40)
+            status = layers.living_status()
+            samples = int(status.get("samples") or 0)
+            if not body.get("force") and samples < threshold:
+                return self._send(200, {"ok": False, "reason": "活层还没攒够",
+                                        "samples": samples, "threshold": threshold})
+            rows = layers._rows()[-max(8, min(samples or threshold, 120)):]
+            record = layers.add_consolidation_layer(rows, weight=0.55,
+                                                    kind="sleep-consolidated",
+                                                    label="睡眠层 " + time.strftime("%H:%M:%S"),
+                                                    min_samples=4) if rows else None
+            if not record:
+                return self._send(200, {"ok": False, "reason": "巩固失败"})
+            layers.cool_living(float(tunables.get("living_cool_factor") or 0.5))
+            log_event("sleep-consolidate", {"layer": record.get("label"), "rows": len(rows)})
+            return self._send(200, {"ok": True, "layer": record.get("label"),
+                                    "duplicate_of": record.get("duplicate_of"),
+                                    "samples": status.get("samples"),
+                                    "cooled": True})
+        if path == "/api/living/status":
+            return self._send(200, layers.living_status())
+        if path == "/api/living/step":
+            count = int(body.get("count") or 5)
+            done = 0
+            for row in layers._rows()[-count:]:
+                if layers.online_step(row):
+                    done += 1
+            return self._send(200, {"ok": True, "steps": done, **layers.living_status()})
         if path == "/api/body/say":
             return self._send(200, body_say(body.get("text") or body.get("content") or "",
                                             body.get("expression") or None,
@@ -4884,6 +5275,29 @@ def background_loop():
                     probe_adb_system()
                 except Exception as error:  # noqa: BLE001
                     log_event("system-probe-adb-error", str(error)[:120])
+            try:
+                imagine_scene()
+            except Exception as error:  # noqa: BLE001
+                log_event("imagine-error", str(error)[:120])
+            try:
+                living_rows = layers._rows()[-3:]
+                for living_row in living_rows:
+                    layers.online_step(living_row, lr=0.01)
+                living_now = layers.living_status()
+                if int(living_now.get("samples") or 0) >= int(tunables.get("living_sleep_steps") or 40):
+                    body_hint = {"force": False}
+                    threshold = int(tunables.get("living_sleep_steps") or 40)
+                    if threshold:
+                        sleep_rows = layers._rows()[-min(80, threshold * 2):]
+                        sleep_record = layers.add_consolidation_layer(
+                            sleep_rows, weight=0.55, kind="sleep-consolidated",
+                            label="睡眠层 " + time.strftime("%H:%M:%S"), min_samples=4)
+                        if sleep_record:
+                            layers.cool_living(float(tunables.get("living_cool_factor") or 0.5))
+                            log_event("sleep-consolidate", {"layer": sleep_record.get("label"),
+                                                            "rows": len(sleep_rows)})
+            except Exception as error:  # noqa: BLE001
+                log_event("living-error", str(error)[:120])
             try:
                 probe_linux_system()
             except Exception as error:  # noqa: BLE001
