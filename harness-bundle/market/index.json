@@ -14,11 +14,12 @@
       "versions": [
         {
           "version": "0.1.0",
-          "publishTimestamp": 1795757248,
+          "publishTimestamp": 1795759100,
           "source": {
             "type": "git",
-            "url": "https://github.com/17880956131/doubao-harness-bundle.git",
-            "commit": "bbd602ad477db38f2c17fbae5ea8ae0109029367"
+            "url": "https://github.com/17880956131/doubao.git",
+            "commit": "e2c59357d53bb43813681303075a8b140e493fbd",
+            "path": "harness-bundle"
           },
           "engines": {
             "dsh": ">=0.2.1-rc.2 <0.3.0-0"
@@ -35,7 +36,7 @@
           "en": "Talk to the local Doubao digital human with her own memory, mood, and expression."
         },
         "author": "17880956131",
-        "repository": "https://github.com/17880956131/doubao-harness-bundle"
+        "repository": "https://github.com/17880956131/doubao"
       }
     }
   ]
