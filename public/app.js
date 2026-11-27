@@ -741,6 +741,13 @@ async function stopRecordingAndSend() {
     setStatus('')
     log('asr-ok', data.text.slice(0, 40))
     $('say').value = data.text
+    addBubble('你（语音）', data.text)
+    try {
+      await fetch('/api/voice/transcript', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: data.text, speaker: 'owner' }),
+      })
+    } catch (err) { log('voice-transcript-error', String(err)) }
     await sendChatText(data.text)
   } catch (err) {
     setStatus('识别失败：' + (err && err.message ? err.message : String(err)))

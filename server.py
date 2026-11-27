@@ -5098,6 +5098,39 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
+        if path == "/api/voice/transcript":
+            text = str(body.get("text") or "").strip()
+            if not text:
+                return self._send(200, {"ok": False, "reason": "没有文字"})
+            speaker = str(body.get("speaker") or "owner")[:40]
+            try:
+                memory.add("voice", "听到你说：" + text[:400], importance=0.4,
+                           session="voice", person=speaker, audience="private")
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                mood.apply("chat", text)
+            except Exception:  # noqa: BLE001
+                pass
+            threat = 0.0
+            try:
+                appraisal = appraise_text(text)
+                threat = appraisal.get("threat", 0.0)
+                if threat > 0:
+                    affect.update(appraisal, text)
+                    mood.threat_shift(threat)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                organs.observe({"kind": "voice", "text": text, "intensity": 0.5})
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                publish({"type": "voice", "text": text[:160], "speaker": speaker})
+            except Exception:  # noqa: BLE001
+                pass
+            log_event("voice-transcript", {"chars": len(text), "speaker": speaker, "threat": threat})
+            return self._send(200, {"ok": True, "text": text, "threat": threat})
         if path == "/api/body/say":
             return self._send(200, body_say(body.get("text") or body.get("content") or "",
                                             body.get("expression") or None,
