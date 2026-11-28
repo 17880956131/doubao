@@ -301,6 +301,7 @@ async function setupModel() {
       let gx = 0
       let gy = 0
       let gz = 0
+      let bx = 0
       if (gesture) {
         const t = (performance.now() - gesture.start) / gesture.duration
         if (t >= 1) {
@@ -311,6 +312,11 @@ async function setupModel() {
           else if (gesture.type === 'tilt') { gz = s * 20; gx = s * 8 }
           else if (gesture.type === 'sway') { gx = s * 24; gz = s * 6 }
           else if (gesture.type === 'look') { gy = -s * 18; gx = -s * 10 }
+          else if (gesture.type === 'bow') { gy = s * 34; bx = -s * 12 }
+          else if (gesture.type === 'lean') { bx = s * 12; gz = s * 8 }
+          else if (gesture.type === 'bounce') { gy = -s * 24; gx = s * 4 }
+          else if (gesture.type === 'turn') { bx = s * 16; gz = -s * 10 }
+          else if (gesture.type === 'wave') { gx = s * 22; gz = s * 12 }
         }
       }
       const ax = core.getParamFloat('PARAM_ANGLE_X')
@@ -320,7 +326,7 @@ async function setupModel() {
       core.setParamFloat('PARAM_ANGLE_Y', ay + headY + gy)
       core.setParamFloat('PARAM_ANGLE_Z', core.getParamFloat('PARAM_ANGLE_Z') + gz)
       core.setParamFloat('PARAM_BODY_ANGLE_Z', bz + gz * 1.4)
-      core.setParamFloat('PARAM_BODY_ANGLE_X', core.getParamFloat('PARAM_BODY_ANGLE_X') + gx * 0.8)
+      core.setParamFloat('PARAM_BODY_ANGLE_X', core.getParamFloat('PARAM_BODY_ANGLE_X') + gx * 0.8 + bx)
       // 表情交给模型自己的表达式系统；这里只做口型（说话时开嘴）
       core.setParamFloat('PARAM_MOUTH_OPEN_Y', Math.max(0, Math.min(1, mouth)))
       if (!window.__surfaceParams) window.__surfaceParams = {}
@@ -348,7 +354,8 @@ async function setupModel() {
   log('model-loaded', { w: Math.round(baseSize.w), h: Math.round(baseSize.h), expressions: exprList.length, motions: motionGroups.join('|') })
 }
 
-const GESTURES = ['nod', 'tilt', 'sway', 'look']
+const GESTURES = ['nod', 'tilt', 'sway', 'look', 'bow', 'lean', 'bounce', 'turn', 'wave']
+const EXPRESSION_GESTURE = { happy: 'bounce', sad: 'bow', surprised: 'lean', shy: 'turn', angry: 'turn', neutral: null }
 
 const GESTURE_MOTION = { nod: 0, tilt: 1, sway: 2, look: 3 }
 
