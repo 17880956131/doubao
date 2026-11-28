@@ -3958,6 +3958,119 @@ def get_asr():
     return _asr
 
 
+SER_DIR = "/sdcard/模型文件/ser-superb"
+_SER = {"model": None, "extractor": None, "failed": False}
+SER_LABELS = {"neu": "平静", "hap": "开心", "ang": "生气", "sad": "低落"}
+
+
+def ser_emotion(data):
+    """wav2vec2 情绪识别；模型不在或失败返回 None。"""
+    if _SER["failed"] or not os.path.exists(os.path.join(SER_DIR, "pytorch_model.bin")):
+        return None
+    try:
+        import io, wave
+        import numpy as np
+        import torch
+        if _SER["model"] is None:
+            from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+            _SER["extractor"] = AutoFeatureExtractor.from_pretrained(SER_DIR)
+            _SER["model"] = AutoModelForAudioClassification.from_pretrained(SER_DIR)
+            _SER["model"].eval()
+        with wave.open(io.BytesIO(data), "rb") as handle:
+            sample_rate = handle.getframerate()
+            channels = handle.getnchannels()
+            frames = handle.readframes(handle.getnframes())
+        samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        if channels > 1:
+            samples = samples.reshape(-1, channels).mean(axis=1)
+        if sample_rate != 16000:
+            count = max(1, int(len(samples) * 16000 / sample_rate))
+            samples = np.interp(np.linspace(0, len(samples), count),
+                                np.arange(len(samples)), samples)
+        inputs = _SER["extractor"](samples, sampling_rate=16000, return_tensors="pt")
+        with torch.inference_mode():
+            logits = _SER["model"](**inputs).logits
+        probs = torch.softmax(logits, dim=-1)[0]
+        index = int(probs.argmax())
+        label = _SER["model"].config.id2label[index]
+        return {"label": SER_LABELS.get(label, label), "score": round(float(probs[index]), 3),
+                "method": "wav2vec2-superb-er"}
+    except Exception as error:  # noqa: BLE001
+        _SER["failed"] = True
+        log_event("ser-error", repr(error)[:200])
+        return None
+
+
+def voice_emotion_from_wav(data):
+    """语音情绪（声学特征版）：能量、音高、音高起伏、语速代理。"""
+    model_result = ser_emotion(data)
+    if model_result:
+        return model_result
+    try:
+        import io, wave
+        import numpy as np
+        with wave.open(io.BytesIO(data), "rb") as handle:
+            sample_rate = handle.getframerate()
+            channels = handle.getnchannels()
+            frames = handle.readframes(handle.getnframes())
+        samples = np.frombuffer(frames, dtype=np.int16).astype(np.float64) / 32768.0
+        if channels > 1:
+            samples = samples.reshape(-1, channels).mean(axis=1)
+        if sample_rate != 16000:
+            count = max(1, int(len(samples) * 16000 / sample_rate))
+            samples = np.interp(np.linspace(0, len(samples), count),
+                                np.arange(len(samples)), samples)
+        if len(samples) < 1600:
+            return None
+        frame = 400
+        hop = 160
+        energies = []
+        pitches = []
+        for start in range(0, max(1, len(samples) - frame), hop):
+            chunk = samples[start:start + frame]
+            energy = float(np.sqrt(np.mean(chunk ** 2)))
+            energies.append(energy)
+            if energy > 0.02:
+                chunk = chunk - chunk.mean()
+                corr = np.correlate(chunk, chunk, mode="full")[frame - 1:]
+                if corr[0] > 0:
+                    corr = corr / corr[0]
+                    low, high = int(16000 / 400), int(16000 / 70)
+                    if high > low:
+                        peak = int(np.argmax(corr[low:high])) + low
+                        if 0 < peak < len(corr) and corr[peak] > 0.3:
+                            pitches.append(16000.0 / peak)
+        energy_mean = float(np.mean(energies)) if energies else 0.0
+        energy_std = float(np.std(energies)) if energies else 0.0
+        pitch_mean = float(np.median(pitches)) if pitches else 0.0
+        pitch_std = float(np.std(pitches)) if pitches else 0.0
+        duration = len(samples) / 16000.0
+        # 归一化后的启发式判断
+        loud = energy_mean > 0.055
+        soft = energy_mean < 0.02
+        variable = pitch_std > 45 or energy_std > 0.045
+        low_pitch = 0 < pitch_mean < 150
+        if loud and variable and pitch_mean >= 170:
+            label, score = "兴奋", 0.6 + min(0.3, pitch_std / 400)
+        elif loud and low_pitch:
+            label, score = "生气", 0.55
+        elif soft and (low_pitch or pitch_std < 30):
+            label, score = "低落", 0.55
+        elif variable and pitch_std > 60:
+            label, score = "惊讶", 0.5
+        elif soft:
+            label, score = "疲惫", 0.5
+        else:
+            label, score = "平静", 0.5
+        return {"label": label, "score": round(min(0.95, score), 2),
+                "method": "prosody",
+                "features": {"energy": round(energy_mean, 4), "energy_std": round(energy_std, 4),
+                             "pitch_hz": round(pitch_mean, 1), "pitch_std": round(pitch_std, 1),
+                             "duration_sec": round(duration, 1)}}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def transcribe_wav(data):
     """浏览器发来的 16k 单声道 16 位 WAV -> 文字。"""
     with wave.open(io.BytesIO(data), "rb") as handle:
@@ -5781,8 +5894,10 @@ class Handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             try:
                 text = transcribe_wav(raw)
-                log_event("asr", {"bytes": len(raw), "chars": len(text)})
-                return self._send(200, {"text": text})
+                emotion = voice_emotion_from_wav(raw)
+                log_event("asr", {"bytes": len(raw), "chars": len(text),
+                                  "emotion": (emotion or {}).get("label")})
+                return self._send(200, {"text": text, "emotion": emotion})
             except Exception as error:  # noqa: BLE001
                 log_event("asr-error", repr(error)[:300])
                 return self._send(502, {"error": "识别失败", "detail": repr(error)[:120]})
