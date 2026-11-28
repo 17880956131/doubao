@@ -4659,6 +4659,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, hallucination_stats())
         if path == "/api/curiosity/predictions":
             return self._send(200, {"items": _read_jsonl(PREDICTIONS)[-20:]})
+        if path == "/api/training/auto":
+            return self._send(200, {"state": auto_training_state(),
+                                    "observation": observation_active(),
+                                    "result": auto_train_cycle()})
         if path == "/api/curiosity/queue":
             return self._send(200, {"items": curiosity_queue()[:20]})
         if path == "/api/actions/recent":
@@ -5689,10 +5693,6 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
-        if path == "/api/training/auto":
-            return self._send(200, {"state": auto_training_state(),
-                                    "observation": observation_active(),
-                                    "result": auto_train_cycle()})
         if path == "/api/layers/train-residual":
             if observation_active():
                 return self._send(200, {"ok": False, "frozen": True,
