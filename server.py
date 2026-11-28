@@ -5215,6 +5215,31 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/labeling/queue":
             queue = labeling_queue()
             return self._send(200, {"items": queue, "expressions": EXPRESSIONS, "gestures": GESTURES})
+        if path == "/api/log/recent":
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            lines = min(300, max(1, int((query.get("lines", ["80"])[0] or 80))))
+            kind = (query.get("kind", [""])[0] or "").strip()
+            items = []
+            try:
+                with open(DATA / "server-8100.log", "r", encoding="utf-8", errors="replace") as handle:
+                    tail = handle.readlines()[-800:]
+                for line in tail:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if kind and kind not in str(entry.get("event")):
+                        continue
+                    items.append(entry)
+            except OSError:
+                pass
+            return self._send(200, {"items": items[-lines:], "kind": kind})
+        if path == "/api/log/files":
+            files = []
+            for path_item in sorted(DATA.glob("*")):
+                if path_item.is_file() and path_item.suffix in (".log", ".jsonl"):
+                    files.append({"name": path_item.name, "kb": round(path_item.stat().st_size / 1024, 1)})
+            return self._send(200, {"files": files})
         if path == "/api/memory/graph/clean":
             before = graph.stats()
             graph.clear()
