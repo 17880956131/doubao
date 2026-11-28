@@ -1076,6 +1076,139 @@ def curiosity_resolve(text):
 PLANETS = DATA / "planets"
 
 
+_NET_SAMPLE = {"ts": 0.0, "rx": 0, "tx": 0}
+_CPU_SAMPLE = {"ts": 0.0, "total": 0, "idle": 0}
+
+
+def _read_cpu():
+    try:
+        with open("/proc/stat", "r", encoding="utf-8") as handle:
+            parts = handle.readline().split()
+        values = [int(v) for v in parts[1:]]
+        total = sum(values)
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        return total, idle
+    except (OSError, ValueError):
+        return 0, 0
+
+
+def _read_net():
+    rx = tx = 0
+    error = None
+    try:
+        with open("/proc/net/dev", "r", encoding="utf-8") as handle:
+            for line in handle.readlines()[2:]:
+                if ":" not in line:
+                    continue
+                name, data = line.split(":", 1)
+                if name.strip() == "lo":
+                    continue
+                fields = data.split()
+                rx += int(fields[0])
+                tx += int(fields[8])
+    except PermissionError:
+        error = "proot 里 /proc/net/dev 无权限"
+    except (OSError, ValueError, IndexError) as exc:
+        error = str(exc)[:80]
+    return rx, tx, error
+
+
+def system_resources():
+    """CPU/内存/网络/温度/电量消耗。电功耗没有直接接口，用掉电速率估算。"""
+    # CPU 总体
+    t1, i1 = _read_cpu()
+    time.sleep(0.25)
+    t2, i2 = _read_cpu()
+    cpu_percent = None
+    cpu_reason = None
+    if t2 > t1:
+        cpu_percent = round(100.0 * (1 - (i2 - i1) / (t2 - t1)), 1)
+    else:
+        cpu_reason = "proot 的 /proc/stat 是冻结的，读不到实时 CPU"
+    # 内存
+    memory = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            info = {}
+            for line in handle:
+                key, _, rest = line.partition(":")
+                info[key] = int(rest.strip().split()[0])
+        total = info.get("MemTotal", 0)
+        available = info.get("MemAvailable", 0)
+        memory = {"total_mb": total // 1024, "available_mb": available // 1024,
+                  "used_percent": round(100 * (1 - available / total), 1) if total else None}
+    except (OSError, ValueError, KeyError):
+        pass
+    # 网络速率
+    rx, tx, net_error = _read_net()
+    now = time.time()
+    if net_error:
+        rx_rate = tx_rate = None
+    elif _NET_SAMPLE["ts"]:
+        dt = max(0.5, now - _NET_SAMPLE["ts"])
+        rx_rate = round((rx - _NET_SAMPLE["rx"]) / dt / 1024, 1)
+        tx_rate = round((tx - _NET_SAMPLE["tx"]) / dt / 1024, 1)
+    else:
+        rx_rate = tx_rate = 0.0
+    if not net_error:
+        _NET_SAMPLE.update({"ts": now, "rx": rx, "tx": tx})
+    # 温度
+    temps = []
+    try:
+        import glob as _glob
+        for path in _glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    temps.append(int(handle.read().strip()) / 1000.0)
+            except (OSError, ValueError):
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    # 电量与掉电速率（来自舞台上报的系统事件）
+    battery = {}
+    events = [event for event in load_system_events(200) if event.get("kind") == "battery"]
+    if events:
+        last = events[-1]
+        battery["last_text"] = last.get("text")
+        import re as _re
+        match = _re.search(r"电量\s*(\d+)%", str(last.get("text") or ""))
+        if match:
+            battery["level"] = int(match.group(1))
+        battery["charging"] = "充电中" in str(last.get("text") or "")
+        battery["observed_at"] = time.strftime("%H:%M", time.localtime(float(last.get("ts") or 0)))
+        if len(events) >= 2 and battery.get("level") is not None:
+            old = events[0]
+            old_match = _re.search(r"电量\s*(\d+)%", str(old.get("text") or ""))
+            gap = float(last.get("ts") or 0) - float(old.get("ts") or 0)
+            if old_match and gap > 60 and not battery.get("charging"):
+                drop = int(old_match.group(1)) - battery["level"]
+                if drop > 0:
+                    battery["drain_percent_per_hour"] = round(drop / (gap / 3600), 2)
+    # 电功耗无直接接口：按 CPU + 掉电速率给个定性
+    if cpu_percent is None:
+        power = "未知"
+    elif battery.get("drain_percent_per_hour") is not None and battery.get("drain_percent_per_hour", 0) >= 12:
+        power = "高"
+    elif cpu_percent >= 70:
+        power = "高"
+    elif cpu_percent >= 30:
+        power = "中"
+    else:
+        power = "低"
+    return {
+        "cpu_percent": cpu_percent,
+        "cpu_reason": cpu_reason,
+        "memory": memory,
+        "network": ({"error": net_error} if net_error else
+                    {"rx_kb_per_s": rx_rate, "tx_kb_per_s": tx_rate,
+                     "total_rx_mb": round(rx / 1048576, 1), "total_tx_mb": round(tx / 1048576, 1)}),
+        "temperature_c": round(max(temps), 1) if temps else None,
+        "battery": battery,
+        "power_estimate": power,
+        "note": "电功耗没有系统接口，power_estimate 由 CPU 与掉电速率估算；网络速率是两次采样的差值",
+    }
+
+
 def environment_state():
     try:
         with open(ENVIRONMENT, "r", encoding="utf-8") as handle:
@@ -4576,6 +4709,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/system/recent":
             return self._send(200, {"events": load_system_events(20),
                                     "summary": (lambda: (json.load(open(SYSTEM_DIGEST, encoding="utf-8")).get("summary") if SYSTEM_DIGEST.exists() else None))()})
+        if path == "/api/system/resources":
+            return self._send(200, system_resources())
         if path == "/api/perception/environment":
             return self._send(200, environment_state())
         if path == "/api/planet/identity":
