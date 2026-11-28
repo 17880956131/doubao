@@ -307,10 +307,10 @@ async function setupModel() {
           gesture = null
         } else {
           const s = Math.sin(Math.PI * t)
-          if (gesture.type === 'nod') gy = s * 16
-          else if (gesture.type === 'tilt') gz = s * 12
-          else if (gesture.type === 'sway') gx = s * 14
-          else if (gesture.type === 'look') gy = -s * 10
+          if (gesture.type === 'nod') { gy = s * 26; gx = s * 6 }
+          else if (gesture.type === 'tilt') { gz = s * 20; gx = s * 8 }
+          else if (gesture.type === 'sway') { gx = s * 24; gz = s * 6 }
+          else if (gesture.type === 'look') { gy = -s * 18; gx = -s * 10 }
         }
       }
       const ax = core.getParamFloat('PARAM_ANGLE_X')
@@ -318,7 +318,9 @@ async function setupModel() {
       const bz = core.getParamFloat('PARAM_BODY_ANGLE_Z')
       core.setParamFloat('PARAM_ANGLE_X', ax + headX + gx)
       core.setParamFloat('PARAM_ANGLE_Y', ay + headY + gy)
-      core.setParamFloat('PARAM_BODY_ANGLE_Z', bz + gz)
+      core.setParamFloat('PARAM_ANGLE_Z', core.getParamFloat('PARAM_ANGLE_Z') + gz)
+      core.setParamFloat('PARAM_BODY_ANGLE_Z', bz + gz * 1.4)
+      core.setParamFloat('PARAM_BODY_ANGLE_X', core.getParamFloat('PARAM_BODY_ANGLE_X') + gx * 0.8)
       // 表情交给模型自己的表达式系统；这里只做口型（说话时开嘴）
       core.setParamFloat('PARAM_MOUTH_OPEN_Y', Math.max(0, Math.min(1, mouth)))
       if (!window.__surfaceParams) window.__surfaceParams = {}
@@ -348,9 +350,22 @@ async function setupModel() {
 
 const GESTURES = ['nod', 'tilt', 'sway', 'look']
 
+const GESTURE_MOTION = { nod: 0, tilt: 1, sway: 2, look: 3 }
+
+function playGestureMotion(type) {
+  if (!model) return
+  const index = GESTURE_MOTION[type]
+  if (index == null) return
+  try {
+    const group = motionGroups.includes('null') ? 'null' : (motionGroups[0] || 'null')
+    model.motion(group, index, PIXI.live2d.MotionPriority.FORCE)
+  } catch (err) { log('gesture-motion-error', String(err)) }
+}
+
 function startGesture(type) {
-  gesture = { type: type || GESTURES[Math.floor(Math.random() * GESTURES.length)], start: performance.now(), duration: 750 }
+  gesture = { type: type || GESTURES[Math.floor(Math.random() * GESTURES.length)], start: performance.now(), duration: 900 }
   state.gesture = gesture.type
+  playGestureMotion(gesture.type)
   log('gesture', gesture.type)
   postState()
 }
@@ -1679,3 +1694,11 @@ async function renderLabelQueue() {
   } catch (err) { box.textContent = '加载失败' }
 }
 setTimeout(renderLabelQueue, 4000)
+
+setInterval(() => {
+  if (!model || gesture || state.speaking) return
+  try {
+    const group = motionGroups.includes('idle') ? 'idle' : motionGroups[0]
+    if (group) model.motion(group, Math.floor(Math.random() * 4), PIXI.live2d.MotionPriority.IDLE)
+  } catch (err) { /* 忽略 */ }
+}, 25000)
