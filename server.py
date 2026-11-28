@@ -1184,6 +1184,37 @@ def system_resources():
                 drop = int(old_match.group(1)) - battery["level"]
                 if drop > 0:
                     battery["drain_percent_per_hour"] = round(drop / (gap / 3600), 2)
+    # 原生桥上报的 cpu/network/power 优先
+    bridge = {}
+    try:
+        events = load_system_events(400)
+        for kind in ("cpu", "network", "power"):
+            matches = [event for event in events if event.get("kind") == kind]
+            if matches:
+                last = matches[-1]
+                bridge[kind] = {"text": last.get("text"),
+                                "ago_sec": int(time.time() - float(last.get("ts") or 0))}
+        if bridge.get("cpu"):
+            import re as _re
+            match = _re.search(r"CPU 占用\s*(\d+)%", str(bridge["cpu"]["text"]))
+            if match:
+                cpu_percent = int(match.group(1))
+                cpu_reason = "来自智命桥"
+        if bridge.get("network"):
+            net_error = None
+            network_text = str(bridge["network"]["text"])
+            net_kb = {}
+            import re as _re
+            dl = _re.search(r"下\s*(\d+)\s*KB/s", network_text)
+            ul = _re.search(r"上\s*(\d+)\s*KB/s", network_text)
+            if dl:
+                net_kb["rx_kb_per_s"] = int(dl.group(1))
+            if ul:
+                net_kb["tx_kb_per_s"] = int(ul.group(1))
+            net_kb["text"] = network_text
+            net_kb["ago_sec"] = bridge["network"]["ago_sec"]
+    except Exception:  # noqa: BLE001
+        pass
     # 电功耗无直接接口：按 CPU + 掉电速率给个定性
     if cpu_percent is None:
         power = "未知"
@@ -1202,6 +1233,7 @@ def system_resources():
         "network": ({"error": net_error} if net_error else
                     {"rx_kb_per_s": rx_rate, "tx_kb_per_s": tx_rate,
                      "total_rx_mb": round(rx / 1048576, 1), "total_tx_mb": round(tx / 1048576, 1)}),
+        "bridge": bridge,
         "temperature_c": round(max(temps), 1) if temps else None,
         "battery": battery,
         "power_estimate": power,
