@@ -3358,6 +3358,53 @@ def prune_preview(quality_threshold=0.35):
     }
 
 
+def render_planet_terrain():
+    """把星球剖面画成图：山脉起伏 + 地层突出 + 断层线。"""
+    from PIL import Image, ImageDraw
+    rows = layers._rows()[-300:]
+    section = planet_section(rows)
+    if not section.get("ok"):
+        return None, section
+    W, H = 900, 520
+    img = Image.new("RGB", (W, H), (12, 10, 24))
+    draw = ImageDraw.Draw(img)
+    grid = [[0.0 for _ in range(6)] for _ in range(6)]
+    for cell in section.get("terrain") or []:
+        gx = min(5, max(0, int((cell["x"] + 1) / 2 * 6)))
+        gy = min(5, max(0, int((cell["y"] + 1) / 2 * 6)))
+        grid[gy][gx] = max(grid[gy][gx], cell["count"] * (0.6 + 0.4 * cell["avg_entropy"]))
+    top = [max(grid[gy][gx] for gy in range(6)) for gx in range(6)]
+    peak = max(top) or 1.0
+    ridge = [int(H * 0.78 - (value / peak) * H * 0.45) for value in top]
+    points = [(0, H)] + [(int((i + 0.5) / 6 * W), ridge[i]) for i in range(6)] + [(W, H)]
+    draw.polygon(points, fill=(34, 30, 58))
+    draw.line(points[1:-1], fill=(120, 104, 200), width=3)
+    # 地层突出：层质心投影到地表，画成尖刺
+    colors = {"E23": (90, 160, 220), "E31": (120, 220, 170), "E34": (230, 190, 90), "E38": (230, 120, 120)}
+    for centroid in (section.get("centroids") or [])[:18]:
+        x = int((centroid["x"] + 1) / 2 * W)
+        height = 40 + abs(centroid["y"]) * 50
+        color = colors.get(centroid.get("era") or "", (150, 140, 200))
+        draw.line([(x, int(H * 0.78)), (x, int(H * 0.78 - height))], fill=color, width=3)
+        draw.ellipse([x - 4, int(H * 0.78 - height) - 4, x + 4, int(H * 0.78 - height) + 4], fill=color)
+    # 断层线：梯度最大的相邻层
+    gradient = section.get("gradient") or []
+    if gradient:
+        strongest = max(gradient, key=lambda item: item["gradient"])
+        x = int(W * 0.55)
+        draw.line([(x, int(H * 0.30)), (x, H)], fill=(240, 90, 90), width=2)
+        draw.text((x + 8, int(H * 0.30)), "FAULT %.2f" % strongest["gradient"], fill=(240, 120, 120))
+    draw.text((24, 20), "WEIGHT PLANET SECTION", fill=(210, 200, 255))
+    draw.text((24, H - 66), "ridges: state density   spikes: layer centroids   red: strongest gradient",
+              fill=(140, 132, 175))
+    draw.text((24, H - 40), "layers=%d  states=%d" % (section.get("layers", 0), section.get("states", 0)),
+              fill=(140, 132, 175))
+    path = DATA / "media" / "planet-terrain.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path)
+    return path, section
+
+
 def uncertainty_metrics():
     """把"疑惑"拆成多样性与不确定性，避免把层多当变糊涂。"""
     import numpy as np
@@ -4882,6 +4929,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/knowledge/status":
             import knowledge
             return self._send(200, knowledge.status())
+        if path == "/api/planet/terrain.png":
+            path, section = render_planet_terrain()
+            if path is None:
+                return self._send(200, section)
+            stats = {"ok": True, "path": str(path), "url": "/media/planet-terrain.png",
+                     "layers": section.get("layers"), "states": section.get("states"),
+                     "gradient_max": max((item["gradient"] for item in section.get("gradient") or []), default=None)}
+            return self._send(200, stats)
         if path == "/api/hallucination/stats":
             return self._send(200, hallucination_stats())
         if path == "/api/curiosity/predictions":
