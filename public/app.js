@@ -1623,3 +1623,59 @@ if ($('env-perception')) {
     else stopEnvPerception()
   })
 }
+
+// ── 主动标注：挑她没把握的状态，让人补标签 ───────────
+const EXPR_ZH = { neutral: '平静', happy: '开心', sad: '难过', surprised: '惊讶', angry: '生气', shy: '害羞' }
+
+async function renderLabelQueue() {
+  const box = $('label-queue')
+  if (!box) return
+  try {
+    const data = await (await fetch('/api/labeling/queue')).json()
+    const items = data.items || []
+    if (!items.length) { box.textContent = '暂时没有需要标注的'; return }
+    box.innerHTML = ''
+    for (const item of items) {
+      const wrap = document.createElement('div')
+      wrap.style.cssText = 'margin:6px 0;padding:8px;border:1px solid rgba(160,140,220,.25);border-radius:10px'
+      const meta = document.createElement('div')
+      meta.style.cssText = 'font-size:11px;color:#8d82b5'
+      meta.textContent = `${item.when} · 预测 ${EXPR_ZH[item.predicted] || item.predicted} · 置信 ${item.confidence}`
+      const text = document.createElement('div')
+      text.style.cssText = 'font-size:12px;margin:4px 0;color:#d8d0f0'
+      text.textContent = item.context
+      const row = document.createElement('div')
+      row.style.cssText = 'display:flex;gap:6px;align-items:center'
+      const select = document.createElement('select')
+      for (const [value, label] of Object.entries(EXPR_ZH)) {
+        const option = document.createElement('option')
+        option.value = value
+        option.textContent = label
+        if (value === item.predicted) option.selected = true
+        select.appendChild(option)
+      }
+      const save = document.createElement('button')
+      save.textContent = '保存'
+      save.onclick = async () => {
+        save.disabled = true
+        try {
+          const res = await fetch('/api/labeling/submit', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: item.id, expression: select.value }),
+          })
+          const data = await res.json()
+          if (data.ok) wrap.remove()
+        } catch (err) { log('label-error', String(err)) }
+        save.disabled = false
+      }
+      row.appendChild(select)
+      row.appendChild(save)
+      wrap.appendChild(meta)
+      wrap.appendChild(text)
+      wrap.appendChild(row)
+      box.appendChild(wrap)
+    }
+    if (!box.children.length) box.textContent = '暂时没有需要标注的'
+  } catch (err) { box.textContent = '加载失败' }
+}
+setTimeout(renderLabelQueue, 4000)

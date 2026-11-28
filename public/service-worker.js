@@ -1,4 +1,4 @@
-const CACHE = 'zhiming-stage-v15'
+const CACHE = 'zhiming-stage-v16'
 const SHELL = [
   '/', '/index.html', '/app.js', '/manifest.webmanifest',
   '/icons/icon-192.png', '/icons/icon-512.png',

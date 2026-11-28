@@ -960,6 +960,41 @@ def curiosity_queue():
     return sorted(pending.values(), key=lambda item: -float(item.get("score") or 0))
 
 
+def labeling_queue(limit=4):
+    """主动学习：挑她最没把握、还没标注的历史状态。"""
+    try:
+        conn = sqlite3.connect(str(DATA / "trajectory.db"), timeout=5)
+        rows = conn.execute(
+            "SELECT id, ts, expression, gesture, mood, context_text, text FROM trajectories "
+            "WHERE (next_expression IS NULL OR next_expression = '') AND COALESCE(context_text, text) != '' "
+            "ORDER BY id DESC LIMIT 200").fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return []
+    candidates = []
+    for row_id, ts, expression, gesture, mood_label, context_text, text in rows:
+        sample = str(context_text or text or "").strip()
+        if not sample:
+            continue
+        prediction = layers.predict(expression or "neutral", gesture or "", False, {},
+                                    mood_label or "平静", text=sample)
+        if not prediction:
+            continue
+        uncertain = (1.0 - float(prediction.get("confidence") or 0.3)) + float(prediction.get("disagreement") or 0.0)
+        candidates.append({
+            "id": row_id,
+            "when": time.strftime("%m-%d %H:%M", time.localtime(float(ts or 0))),
+            "state": "表情 %s / %s" % (expression or "neutral", gesture or "无动作"),
+            "context": sample[:120],
+            "predicted": prediction.get("expression"),
+            "gesture": prediction.get("gesture"),
+            "confidence": prediction.get("confidence"),
+            "uncertain": round(uncertain, 3),
+        })
+    candidates.sort(key=lambda item: -item["uncertain"])
+    return candidates[:limit]
+
+
 def curiosity_entities(text):
     """好奇心用的实体抽取：过滤口头语，保留概念词。"""
     import re as _re
@@ -4929,6 +4964,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/knowledge/status":
             import knowledge
             return self._send(200, knowledge.status())
+        if path == "/api/labeling/queue":
+            queue = labeling_queue()
+            return self._send(200, {"items": queue, "expressions": EXPRESSIONS, "gestures": GESTURES})
         if path == "/api/memory/graph/clean":
             before = graph.stats()
             graph.clear()
@@ -6062,6 +6100,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, curiosity_predict(str(body.get("entity") or ""),
                                                      body.get("guess"),
                                                      str(body.get("session") or "main")))
+        if path == "/api/labeling/submit":
+            row_id = int(body.get("id") or 0)
+            expression = str(body.get("expression") or "").strip()
+            gesture = str(body.get("gesture") or "").strip()
+            if not row_id or expression not in EXPRESSIONS:
+                return self._send(200, {"ok": False, "reason": "参数不对"})
+            try:
+                conn = sqlite3.connect(str(DATA / "trajectory.db"), timeout=5)
+                conn.execute("UPDATE trajectories SET next_expression=?, next_gesture=?, source='feedback' WHERE id=?",
+                             (expression, gesture, row_id))
+                conn.commit()
+                conn.close()
+            except sqlite3.Error as error:
+                return self._send(200, {"ok": False, "reason": str(error)[:80]})
+            log_event("labeling-submit", {"id": row_id, "expression": expression})
+            return self._send(200, {"ok": True, "remaining": len(labeling_queue())})
         if path == "/api/curiosity/scan":
             return self._send(200, curiosity_scan(str(body.get("text") or ""),
                                                   str(body.get("session") or "main")))
