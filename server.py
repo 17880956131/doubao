@@ -482,7 +482,7 @@ def appraise_text(text):
     except Exception:  # noqa: BLE001
         prob = None
     if prob is not None:
-        learned = prob if prob >= 0.5 else 0.0
+        learned = prob if prob >= 0.72 else 0.0
         if learned > float(appraisal.get("threat") or 0):
             appraisal["threat"] = round(learned, 3)
             appraisal["source"] = "learned"

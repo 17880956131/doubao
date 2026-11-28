@@ -58,10 +58,10 @@ class Mood:
             minutes = max(0.0, (now - (self.state.get("updatedAt") or now)) / 60)
             if minutes > 0.5:
                 hour = time.localtime(now).tm_hour
-                self.state["valence"] *= math.exp(-minutes / 240)
-                self.state["arousal"] = 0.2 + (self.state["arousal"] - 0.2) * math.exp(-minutes / 120)
+                self.state["valence"] = 0.1 + (self.state["valence"] - 0.1) * math.exp(-minutes / 180)
+                self.state["arousal"] = 0.3 + (self.state["arousal"] - 0.3) * math.exp(-minutes / 90)
                 self.state["boredom"] = min(1.0, self.state["boredom"] + minutes * 0.0015)
-                self.state["energy"] = max(0.05, self.state["energy"] - minutes * 0.0004)
+                self.state["energy"] = 0.55 + (self.state["energy"] - 0.55) * math.exp(-minutes / 240)
                 if hour >= 23 or hour < 6:
                     self._shift("energy", -minutes * 0.001)
                 self.state["attachment"] = min(1.0, self.state["attachment"] * math.exp(-minutes / 4320))
@@ -70,9 +70,10 @@ class Mood:
 
     def threat_shift(self, level=0.5):
         with self.lock:
-            self._shift("valence", -0.25 * level)
-            self._shift("arousal", 0.2 * level)
-            self._shift("energy", -0.08 * level)
+            level = max(0.0, min(1.0, float(level)))
+            self._shift("valence", -0.12 * level)
+            self._shift("arousal", 0.10 * level)
+            self._shift("energy", -0.04 * level)
             self._save()
 
     def reassure_shift(self):
@@ -85,11 +86,11 @@ class Mood:
         with self.lock:
             if event == "chat":
                 if any(word in text for word in POSITIVE):
-                    self._shift("valence", 0.08)
-                    self._shift("arousal", 0.05)
+                    self._shift("valence", 0.12)
+                    self._shift("arousal", 0.06)
                     self._shift("energy", 0.03)
                 if any(word in text for word in NEGATIVE):
-                    self._shift("valence", -0.08)
+                    self._shift("valence", -0.12)
                     self._shift("energy", -0.04)
                 self._shift("attachment", 0.01)
                 self._shift("boredom", -0.15)

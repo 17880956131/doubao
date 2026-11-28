@@ -1728,3 +1728,22 @@ async function initVoiceEngine() {
   })
 }
 setTimeout(initVoiceEngine, 3500)
+
+// ── 日志查看器 ───────────────────────────
+async function loadLogs() {
+  const box = $('log-list')
+  if (!box) return
+  const kind = $('log-kind') ? $('log-kind').value : ''
+  try {
+    const data = await (await fetch('/api/log/recent?lines=25&kind=' + encodeURIComponent(kind))).json()
+    const items = data.items || []
+    if (!items.length) { box.textContent = '没有记录'; return }
+    box.innerHTML = items.slice().reverse().map((item) => {
+      const detail = item.detail && typeof item.detail === 'object' ? JSON.stringify(item.detail) : String(item.detail || '')
+      return `<div style="padding:2px 0;border-bottom:1px solid rgba(160,140,220,.12)"><span style="color:#8d82b5">${item.t || ''}</span> ${item.event || ''} <span style="color:#b9aee0">${detail.slice(0, 90)}</span></div>`
+    }).join('')
+  } catch (err) { box.textContent = '加载失败' }
+}
+if ($('log-refresh')) $('log-refresh').addEventListener('click', loadLogs)
+if ($('log-kind')) $('log-kind').addEventListener('change', loadLogs)
+setTimeout(loadLogs, 5000)
