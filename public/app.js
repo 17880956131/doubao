@@ -980,6 +980,14 @@ function setupPerception() {
           }
           addBubble('豆宝（画面）', event.text || '（生成了一张画面）')
         }
+        if (event.type === 'vision' && event.text) {
+          addBubble('豆宝（看到）', event.text)
+          if (event.expression && model) {
+            setExpression(event.expression)
+            if (event.gesture) startGesture(event.gesture)
+          }
+          continue
+        }
         if (event.type === 'imagination' && event.text) {
           addBubble('豆宝（想象）', event.text)
           if (event.expression) setExpression(event.expression)

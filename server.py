@@ -5729,25 +5729,53 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             status = vision_status()
             if not description:
-                description, status = vision_with_scheduling(image_result["path"])
+                description, status = vision_with_scheduling(
+                    image_result["path"], str(body.get("model") or "auto"))
+            caption_zh = None
+            expression = None
+            gesture = None
             if description:
+                caption_zh = translate_caption(description)
+                caption_for_memory = caption_zh or description
                 try:
-                    memory.add("image", "看到画面：" + description[:300], importance=0.45)
+                    memory.add("image", "看到画面：" + caption_for_memory[:300], importance=0.45)
                 except Exception:  # noqa: BLE001
                     pass
                 try:
+                    appraisal = appraise_text(caption_for_memory)
+                    affect.update(appraisal, caption_for_memory)
+                    mood.apply("image", caption_for_memory)
                     presence_now = dict(_presence) if isinstance(_presence, dict) else {}
-                    trajectory.add({"expression": presence_now.get("expression") or "neutral",
-                                    "gesture": presence_now.get("gesture") or "",
+                    prediction = layers.predict(presence_now.get("expression") or "neutral",
+                                                presence_now.get("gesture") or "", False, {},
+                                                mood.snapshot().get("label"), text=caption_for_memory)
+                    if prediction:
+                        expression = prediction.get("expression")
+                        gesture = prediction.get("gesture")
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    trajectory.add({"expression": expression or "neutral",
+                                    "gesture": gesture or "",
                                     "speaking": False, "mood": mood.snapshot().get("label"),
                                     "scene": "vision",
-                                    "params": {"vision": {"caption": description[:200],
+                                    "params": {"vision": {"caption": caption_for_memory[:200],
+                                                          "caption_en": description[:200],
                                                           "brightness": brightness,
                                                           "path": image_result["path"]}},
                                     "source": "vision"})
                 except Exception:  # noqa: BLE001
                     pass
-            return self._send(200, {**image_result, "caption": description or "（未识别）",
+                try:
+                    publish({"type": "vision", "text": caption_for_memory[:160],
+                             "expression": expression or "neutral",
+                             "gesture": gesture or "", "caption_en": description[:160]})
+                except Exception:  # noqa: BLE001
+                    pass
+            return self._send(200, {**image_result,
+                                    "caption": description or "（未识别）",
+                                    "caption_zh": caption_zh,
+                                    "expression": expression,
                                     "vision": status})
         if path == "/api/companion/say":
             text = str(body.get("text") or "").strip()
