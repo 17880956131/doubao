@@ -1789,6 +1789,26 @@ def _start_local_brain_bg():
         pass
 
 
+def translate_caption(text):
+    """把英文视觉描述转成简短中文；失败返回 None。"""
+    text = str(text or "").strip()
+    if not text:
+        return None
+    if any("\u4e00" <= ch <= "\u9fff" for ch in text):
+        return text
+    try:
+        reply = openai_chat("https://api.deepseek.com", "", "deepseek-chat",
+                            "把这句话翻译成简短中文，只输出译文：" + text, [], "zh",
+                            system="你是翻译。只输出一句简短中文，不要解释。", account=True, timeout=30)
+        reply = parse_reply(reply).get("text") or reply
+        reply = str(reply).strip()
+        if any("\u4e00" <= ch <= "\u9fff" for ch in reply):
+            return reply[:160]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def vision_with_scheduling(image_path, model="auto"):
     """视觉按需：gemma 大模型需要腾内存；smolvlm 轻量不需要。auto 会失败后兜底。"""
     if str(model).lower() == "smolvlm":
