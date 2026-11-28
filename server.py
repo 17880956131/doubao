@@ -4306,8 +4306,8 @@ def log_event(event, detail=None):
         pass
 
 
-async def _synth(text, voice, rate):
-    communicate = edge_tts.Communicate(text, voice, rate=rate)
+async def _synth(text, voice, rate, pitch="+0Hz"):
+    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
     buffer = bytearray()
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
@@ -4315,13 +4315,68 @@ async def _synth(text, voice, rate):
     return bytes(buffer)
 
 
-def synth_cached(text, voice, rate):
-    digest = hashlib.sha1(f"{voice}|{rate}|{text}".encode("utf-8")).hexdigest()
+VOICE_IDENTITY = DATA / "voice_identity.json"
+VOICE_CHOICES = ["zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-XiaomoNeural",
+                 "zh-CN-XiaoxuanNeural", "zh-CN-XiaohanNeural"]
+
+
+def voice_identity():
+    """她的声音身份：固定种子选一个音色，再用情绪调语速/音高。"""
+    try:
+        with open(VOICE_IDENTITY, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        state = {}
+    if not state.get("seed"):
+        core_text = ""
+        try:
+            with open(SELF_CORE, "r", encoding="utf-8") as handle:
+                core_text = handle.read()
+        except OSError:
+            pass
+        seed = int(hashlib.sha1(core_text.encode("utf-8")).hexdigest()[:8], 16)
+        state = {"seed": seed, "voice": VOICE_CHOICES[seed % len(VOICE_CHOICES)],
+                 "base_rate": "+0%", "base_pitch": "+0Hz",
+                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        try:
+            with open(VOICE_IDENTITY, "w", encoding="utf-8") as handle:
+                json.dump(state, handle, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+    return state
+
+
+def mood_prosody(label):
+    text = str(label or "")
+    if any(word in text for word in ("开心", "高兴", "兴奋")):
+        return 6, 10
+    if any(word in text for word in ("难过", "伤心", "低落")):
+        return -8, -12
+    if any(word in text for word in ("生气", "愤怒")):
+        return 10, 6
+    if "惊讶" in text or "惊" in text:
+        return 12, 12
+    if "害羞" in text or "羞" in text:
+        return 2, -6
+    if "困" in text or "累" in text:
+        return -6, -8
+    return 0, 0
+
+
+def parse_percent(value, default=0):
+    try:
+        return int(str(value).strip().replace("%", "").replace("+", ""))
+    except (TypeError, ValueError):
+        return default
+
+
+def synth_cached(text, voice, rate, pitch="+0Hz"):
+    digest = hashlib.sha1(f"{voice}|{rate}|{pitch}|{text}".encode("utf-8")).hexdigest()
     path = CACHE / f"{digest}.mp3"
     if path.exists() and path.stat().st_size > 0:
         return path.read_bytes()
     async def guarded():
-        return await asyncio.wait_for(_synth(text, voice, rate), TTS_TIMEOUT)
+        return await asyncio.wait_for(_synth(text, voice, rate, pitch), TTS_TIMEOUT)
     audio = asyncio.run(guarded())
     if not audio:
         raise RuntimeError("合成结果为空")
@@ -4964,6 +5019,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/knowledge/status":
             import knowledge
             return self._send(200, knowledge.status())
+        if path == "/api/voice/identity":
+            return self._send(200, voice_identity())
         if path == "/api/labeling/queue":
             queue = labeling_queue()
             return self._send(200, {"items": queue, "expressions": EXPRESSIONS, "gestures": GESTURES})
@@ -5654,15 +5711,27 @@ class Handler(BaseHTTPRequestHandler):
         body = self._json()
         if path == "/api/tts":
             text = str(body.get("text") or "").strip()
-            voice = str(body.get("voice") or "zh-CN-XiaoxiaoNeural")
-            rate = str(body.get("rate") or "+0%")
+            identity = voice_identity()
+            voice = str(body.get("voice") or identity.get("voice") or "zh-CN-XiaoxiaoNeural")
+            mood_label = str(body.get("mood") or mood.snapshot().get("label") or "")
+            rate_delta, pitch_delta = mood_prosody(mood_label)
+            if body.get("rate"):
+                rate = str(body["rate"])
+            else:
+                base = parse_percent(identity.get("base_rate"))
+                rate = "%+d%%" % max(-40, min(60, base + rate_delta))
+            if body.get("pitch"):
+                pitch = str(body["pitch"])
+            else:
+                pitch = "%+dHz" % pitch_delta
             if not text:
                 return self._send(400, {"error": "empty text"})
             if len(text) > TTS_MAX_CHARS:
                 text = text[:TTS_MAX_CHARS]
             try:
-                audio = synth_cached(text, voice, rate)
-                log_event("tts", {"chars": len(text), "bytes": len(audio), "voice": voice})
+                audio = synth_cached(text, voice, rate, pitch)
+                log_event("tts", {"chars": len(text), "bytes": len(audio), "voice": voice,
+                                  "rate": rate, "pitch": pitch, "mood": mood_label})
                 return self._send(200, audio, "audio/mpeg")
             except Exception as error:  # noqa: BLE001 - 网络/超时都要容错
                 log_event("tts-error", str(error)[:300])
@@ -6100,6 +6169,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, curiosity_predict(str(body.get("entity") or ""),
                                                      body.get("guess"),
                                                      str(body.get("session") or "main")))
+        if path == "/api/voice/identity":
+            state = voice_identity()
+            if body.get("voice"):
+                state["voice"] = str(body["voice"])[:60]
+            if "base_rate" in body:
+                state["base_rate"] = str(body["base_rate"])[:10]
+            if "base_pitch" in body:
+                state["base_pitch"] = str(body["base_pitch"])[:10]
+            if body.get("reseed"):
+                state["seed"] = int(time.time())
+                state["voice"] = VOICE_CHOICES[state["seed"] % len(VOICE_CHOICES)]
+            state["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                with open(VOICE_IDENTITY, "w", encoding="utf-8") as handle:
+                    json.dump(state, handle, ensure_ascii=False, indent=2)
+            except OSError:
+                pass
+            return self._send(200, {"ok": True, "state": state})
         if path == "/api/labeling/submit":
             row_id = int(body.get("id") or 0)
             expression = str(body.get("expression") or "").strip()
