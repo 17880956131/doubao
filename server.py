@@ -1188,8 +1188,9 @@ def system_resources():
     bridge = {}
     try:
         events = load_system_events(400)
-        for kind in ("cpu", "network", "power"):
-            matches = [event for event in events if event.get("kind") == kind]
+        for kind in ("cpu", "network", "power", "bridge-error"):
+            matches = [event for event in events if event.get("kind") == kind
+                       and event.get("source") == "android-bridge"]
             if matches:
                 last = matches[-1]
                 bridge[kind] = {"text": last.get("text"),
@@ -1200,6 +1201,10 @@ def system_resources():
             if match:
                 cpu_percent = int(match.group(1))
                 cpu_reason = "来自智命桥"
+            else:
+                load_match = _re.search(r"系统负载\s*([0-9.]+)", str(bridge["cpu"]["text"]))
+                if load_match:
+                    cpu_reason = "智命桥只能读到负载 " + load_match.group(1) + "（CPU 百分比被系统限制）"
         if bridge.get("network"):
             net_error = None
             network_text = str(bridge["network"]["text"])
@@ -1755,6 +1760,8 @@ VISION_MODEL = "/sdcard/模型文件/gemma-4-E2B_q4_0-it.gguf"
 VISION_PROJECTOR = "/sdcard/模型文件/mmproj-gemma-4-E2B-it-BF16.gguf"
 VISION_BIN = "/root/workspace/tools/llama-b12811/llama-mtmd-cli"
 VISION_LIB = "/root/workspace/tools/llama-b12811"
+SMOLVLM_MODEL = "/sdcard/模型文件/SmolVLM2-256M-Video/smolvlm2-256m-q8.gguf"
+SMOLVLM_PROJECTOR = "/sdcard/模型文件/SmolVLM2-256M-Video/smolvlm2-256m-mmproj-q8.gguf"
 
 
 VISION_LOCK = threading.Lock()
@@ -1782,15 +1789,30 @@ def _start_local_brain_bg():
         pass
 
 
-def vision_with_scheduling(image_path):
-    """视觉按需：先腾内存给视觉模型，跑完再把对话模型拉回来。"""
+def vision_with_scheduling(image_path, model="auto"):
+    """视觉按需：gemma 大模型需要腾内存；smolvlm 轻量不需要。auto 会失败后兜底。"""
+    if str(model).lower() == "smolvlm":
+        with VISION_LOCK:
+            return vision_describe(image_path, model="smolvlm")
     with VISION_LOCK:
         stopped = _stop_local_brain()
         try:
-            return vision_describe(image_path)
+            text, status = vision_describe(image_path, model="gemma")
+            if text or str(model).lower() != "auto":
+                return text, status
+            if smolvlm_available():
+                fallback_text, fallback_status = vision_describe(image_path, model="smolvlm")
+                if fallback_text:
+                    return fallback_text, {**fallback_status, "fallback": "smolvlm"}
+                return None, {**status, "fallback_error": fallback_status.get("reason")}
+            return None, status
         finally:
             if stopped:
                 threading.Thread(target=_start_local_brain_bg, daemon=True).start()
+
+
+def smolvlm_available():
+    return os.path.exists(SMOLVLM_MODEL) and os.path.exists(SMOLVLM_PROJECTOR)
 
 
 def vision_status():
@@ -1798,17 +1820,21 @@ def vision_status():
     binary = VISION_BIN if os.path.exists(VISION_BIN) else _shutil.which("llama-mtmd-cli")
     models_ok = os.path.exists(VISION_MODEL) and os.path.exists(VISION_PROJECTOR)
     return {
-        "available": bool(binary and models_ok),
+        "available": bool(binary and (models_ok or smolvlm_available())),
         "binary": binary,
         "models": models_ok,
-        "reason": ("可用" if binary and models_ok else
-                   "本机没有 llama-mtmd-cli 多模态运行时，视觉只能先保存图片/用外部描述"),
-        "model": VISION_MODEL if models_ok else None,
+        "smolvlm": smolvlm_available(),
+        "reason": ("可用" if binary and (models_ok or smolvlm_available()) else
+                   "本机没有 llama-mtmd-cli 多模态运行时"),
+        "model": VISION_MODEL if models_ok else (SMOLVLM_MODEL if smolvlm_available() else None),
     }
 
 
-def vision_describe(image_path):
+def vision_describe(image_path, model="gemma"):
+    use_smolvlm = str(model).lower() == "smolvlm"
     status = vision_status()
+    if use_smolvlm and not smolvlm_available():
+        return None, {"available": False, "reason": "SmolVLM2 文件不在"}
     if not status.get("available"):
         return None, status
     small = image_path
@@ -1823,12 +1849,26 @@ def vision_describe(image_path):
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = VISION_LIB + ":" + env.get("LD_LIBRARY_PATH", "")
     try:
-        result = subprocess.run(
-            [status["binary"], "--jinja", "-m", VISION_MODEL, "--mmproj", VISION_PROJECTOR,
-             "--image", small, "-p", "这是一张照片。请直接用中文说出照片里有什么，一句话即可。不要输出英文，不要分析过程。",
-             "-n", "300", "-t", "6"],
-            capture_output=True, text=True, timeout=480, env=env)
+        if use_smolvlm:
+            command = [status["binary"], "-m", SMOLVLM_MODEL, "--mmproj", SMOLVLM_PROJECTOR,
+                       "--image", small, "-p", "Describe this image in one short sentence.",
+                       "-n", "48", "--temp", "0", "-t", "4"]
+        else:
+            command = [status["binary"], "--jinja", "-m", VISION_MODEL, "--mmproj", VISION_PROJECTOR,
+                       "--image", small, "-p", "这是一张照片。请直接用中文说出照片里有什么，一句话即可。不要输出英文，不要分析过程。",
+                       "-n", "300", "-t", "6"]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=480, env=env)
         raw = (result.stdout or "").strip()
+        if use_smolvlm:
+            lines = [line.strip() for line in raw.splitlines() if line.strip()]
+            caption = ""
+            for line in reversed(lines):
+                if sum(1 for ch in line if ch.isalpha()) >= 6:
+                    caption = line
+                    break
+            if not caption:
+                return None, {**status, "reason": "模型没有输出描述", "raw_tail": raw[-120:]}
+            return caption[:200], {**status, "model": "smolvlm"}
         import re as _re
         sentences = _re.findall(r"[\u4e00-\u9fff，。！？、；：（）“”A-Za-z0-9\s]{6,}", raw)
         chinese = [part.strip() for part in sentences if sum(1 for ch in part if "\u4e00" <= ch <= "\u9fff") >= 4]
