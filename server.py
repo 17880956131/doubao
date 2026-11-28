@@ -4316,6 +4316,11 @@ async def _synth(text, voice, rate, pitch="+0Hz"):
 
 
 VOICE_IDENTITY = DATA / "voice_identity.json"
+VOICE_STYLE = DATA / "voice_style.npy"
+KOKORO_MODEL = "/sdcard/模型文件/kokoro/kokoro-v1.0.onnx"
+KOKORO_VOICES = "/sdcard/模型文件/kokoro/voices-v1.0.bin"
+_KOKORO = None
+_KOKORO_G2P = None
 VOICE_CHOICES = ["zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-XiaomoNeural",
                  "zh-CN-XiaoxuanNeural", "zh-CN-XiaohanNeural"]
 
@@ -4335,7 +4340,8 @@ def voice_identity():
         except OSError:
             pass
         seed = int(hashlib.sha1(core_text.encode("utf-8")).hexdigest()[:8], 16)
-        state = {"seed": seed, "voice": VOICE_CHOICES[seed % len(VOICE_CHOICES)],
+        state = {"seed": seed, "engine": "edge",
+                 "voice": VOICE_CHOICES[seed % len(VOICE_CHOICES)],
                  "base_rate": "+0%", "base_pitch": "+0Hz",
                  "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         try:
@@ -4344,6 +4350,78 @@ def voice_identity():
         except OSError:
             pass
     return state
+
+
+def kokoro_ready():
+    return os.path.exists(KOKORO_MODEL) and os.path.exists(KOKORO_VOICES)
+
+
+def kokoro_engine():
+    global _KOKORO, _KOKORO_G2P
+    if _KOKORO is None:
+        from kokoro_onnx import Kokoro
+        _KOKORO = Kokoro(KOKORO_MODEL, KOKORO_VOICES)
+    if _KOKORO_G2P is None:
+        from misaki import zh as _zh
+        _KOKORO_G2P = _zh.ZHG2P()
+    return _KOKORO, _KOKORO_G2P
+
+
+def kokoro_style_vector():
+    """她的音色向量：由种子从两个中文声线插值而来，独一无二。"""
+    import numpy as np
+    identity = voice_identity()
+    seed = int(identity.get("seed") or 1)
+    if VOICE_STYLE.exists():
+        try:
+            return np.load(VOICE_STYLE)
+        except Exception:  # noqa: BLE001
+            pass
+    kokoro, _ = kokoro_engine()
+    choices = ["zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi"]
+    first = choices[seed % len(choices)]
+    second = choices[(seed // 7 + 1) % len(choices)]
+    if second == first:
+        second = choices[(choices.index(first) + 1) % len(choices)]
+    mix = 0.35 + (seed % 31) / 100.0
+    a = np.asarray(kokoro.get_voice_style(first), dtype=np.float32)
+    b = np.asarray(kokoro.get_voice_style(second), dtype=np.float32)
+    vector = (a * mix + b * (1 - mix)).astype(np.float32)
+    try:
+        np.save(VOICE_STYLE, vector)
+    except OSError:
+        pass
+    return vector
+
+
+def synth_kokoro(text, rate=0, pitch=0):
+    import io, wave
+    import numpy as np
+    kokoro, g2p = kokoro_engine()
+    phonemes, _ = g2p(text)
+    speed = max(0.6, min(1.6, 1.0 + rate / 100.0))
+    samples, sample_rate = kokoro.create(phonemes, voice=kokoro_style_vector(),
+                                         speed=speed, is_phonemes=True)
+    audio = (np.clip(samples, -1.0, 1.0) * 32767).astype("int16")
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(audio.tobytes())
+    return buffer.getvalue()
+
+
+def synth_cached_kokoro(text, rate=0):
+    digest = hashlib.sha1(("kokoro|%d|%s" % (rate, text)).encode("utf-8")).hexdigest()
+    path = CACHE / (digest + ".wav")
+    if path.exists() and path.stat().st_size > 0:
+        return path.read_bytes()
+    audio = synth_kokoro(text, rate=rate)
+    if not audio:
+        raise RuntimeError("Kokoro 合成结果为空")
+    path.write_bytes(audio)
+    return audio
 
 
 def mood_prosody(label):
@@ -5728,7 +5806,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "empty text"})
             if len(text) > TTS_MAX_CHARS:
                 text = text[:TTS_MAX_CHARS]
+            engine = str(body.get("engine") or identity.get("engine") or "edge")
             try:
+                if engine == "kokoro" and kokoro_ready():
+                    audio = synth_cached_kokoro(text, parse_percent(rate))
+                    log_event("tts", {"chars": len(text), "bytes": len(audio),
+                                      "engine": "kokoro", "rate": rate, "mood": mood_label})
+                    return self._send(200, audio, "audio/wav")
                 audio = synth_cached(text, voice, rate, pitch)
                 log_event("tts", {"chars": len(text), "bytes": len(audio), "voice": voice,
                                   "rate": rate, "pitch": pitch, "mood": mood_label})
@@ -6171,6 +6255,8 @@ class Handler(BaseHTTPRequestHandler):
                                                      str(body.get("session") or "main")))
         if path == "/api/voice/identity":
             state = voice_identity()
+            if body.get("engine"):
+                state["engine"] = "kokoro" if str(body["engine"]).lower() == "kokoro" else "edge"
             if body.get("voice"):
                 state["voice"] = str(body["voice"])[:60]
             if "base_rate" in body:

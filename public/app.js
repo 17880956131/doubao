@@ -1709,3 +1709,22 @@ setInterval(() => {
     if (group) model.motion(group, Math.floor(Math.random() * 4), PIXI.live2d.MotionPriority.IDLE)
   } catch (err) { /* 忽略 */ }
 }, 25000)
+
+// ── 语音引擎切换（edge / kokoro）─────────────
+async function initVoiceEngine() {
+  const select = $('voice-engine')
+  if (!select) return
+  try {
+    const identity = await (await fetch('/api/voice/identity')).json()
+    select.value = identity.engine === 'kokoro' ? 'kokoro' : 'edge'
+  } catch (err) { /* 忽略 */ }
+  select.addEventListener('change', async () => {
+    try {
+      await fetch('/api/voice/identity', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ engine: select.value }),
+      })
+    } catch (err) { log('voice-engine-error', String(err)) }
+  })
+}
+setTimeout(initVoiceEngine, 3500)
