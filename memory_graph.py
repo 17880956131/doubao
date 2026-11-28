@@ -23,17 +23,46 @@ def _segments(text):
     return [part.strip() for part in re.split(r"[，。；！？、\n,.;!?]", cleaned) if part.strip()]
 
 
+NOISE_PATTERN = re.compile(r"[`#*_~|<>\[\]{}()=+\\/;:：\"']|https?://|对话里说")
+
+
+def clean_entity(entity):
+    """过滤代码块、排版符号、纯数字等噪声实体。"""
+    value = str(entity or "").strip()
+    if len(value) < 2:
+        return None
+    if NOISE_PATTERN.search(value):
+        return None
+    chinese = sum(1 for ch in value if "\u4e00" <= ch <= "\u9fff")
+    letters = sum(1 for ch in value if ch.isalpha())
+    if chinese < 2 and letters < 2:
+        return None
+    if chinese < 2 and not re.fullmatch(r"[A-Za-z0-9\-]{2,12}", value):
+        return None
+    if value in STOP_WORDS or value in {"所以", "但是", "然后", "就是", "这个", "那个"}:
+        return None
+    if value.endswith(("：", ":", "说", "的")):
+        return None
+    if len(value) > 6:
+        return None
+    if any(word in value for word in ("了", "吗", "呢", "吧", "啊", "我", "你", "他", "她", "这", "那", "就", "也", "都", "没", "在", "给")):
+        return None
+    return value
+
+
 def extract_entities(text):
     entities = []
     for segment in _segments(text):
         for pattern in ENTITY_PATTERNS:
             for match in re.findall(pattern, segment):
                 cleaned = re.split(r"[能帮会要让把是有]", match)[0].strip("的了呢啊呀吧啦嘛哈哦哟")
-                if 1 <= len(cleaned) <= 10 and cleaned not in STOP_WORDS:
+                cleaned = clean_entity(cleaned)
+                if cleaned and cleaned not in STOP_WORDS:
                     entities.append(cleaned)
         cleaned = segment.strip("的了呢啊呀吧啦嘛哈哦哟")
         cleaned = re.split(r"[能帮会要让把是有]", cleaned)[0].strip("的了呢啊呀吧啦嘛哈哦哟")
-        if 2 <= len(cleaned) <= 8 and not re.search(r"[喜欢爱怕喝吃想要记住]", cleaned) \
+        cleaned = clean_entity(cleaned)
+        if cleaned and not re.search(r"[喜欢爱怕喝吃想要记住]", cleaned) \
                 and cleaned not in STOP_WORDS:
             entities.append(cleaned)
     seen = []
@@ -110,6 +139,13 @@ class MemoryGraph:
             self.conn.execute("INSERT INTO edges (src,dst,relation,layer,weight,last_ts) VALUES (?,?,?,?,?,?)",
                               (src, dst, relation, layer, weight, time.time()))
         self.conn.commit()
+
+    def clear(self):
+        with self.lock:
+            self.conn.execute("DELETE FROM edges")
+            self.conn.execute("DELETE FROM nodes")
+            self.conn.commit()
+        return {"ok": True}
 
     def build(self, limit=500):
         try:

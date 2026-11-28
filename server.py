@@ -4929,6 +4929,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/knowledge/status":
             import knowledge
             return self._send(200, knowledge.status())
+        if path == "/api/memory/graph/clean":
+            before = graph.stats()
+            graph.clear()
+            built = graph.build(limit=400)
+            after = graph.stats()
+            log_event("graph-clean", {"before": before, "after": after})
+            return self._send(200, {"ok": True, "before": before, "after": after,
+                                    "built": built.get("built")})
         if path == "/api/planet/terrain.png":
             path, section = render_planet_terrain()
             if path is None:
