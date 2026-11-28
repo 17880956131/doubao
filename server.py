@@ -559,6 +559,105 @@ SYSTEM_EVENTS = DATA / "system_events.jsonl"
 SELF_CORE = DATA / "self_core.json"
 SOCIAL = DATA / "social.json"
 ENVIRONMENT = DATA / "environment.json"
+TRAINING_AUTO = DATA / "training_auto.json"
+
+
+def train_residual_layer_guarded():
+    """残差层训练 + 留出集护栏（变差自动回滚）。"""
+    rows = layers._rows()[-300:]
+    if len(rows) < 80:
+        return {"ok": False, "reason": "样本不足", "samples": len(rows)}
+    split = max(40, int(len(rows) * 0.6))
+    train_rows, test_rows = rows[:split], rows[split:]
+    def holdout_accuracy():
+        probs, y = layers.ensemble_matrix(test_rows)
+        if probs is None:
+            return None
+        return round(float((probs.argmax(axis=1) == y).mean()), 3)
+    before = holdout_accuracy()
+    result = layers.add_residual_layer(train_rows, weight=1.3,
+                                       label="残差层 " + time.strftime("%H:%M:%S"))
+    after = holdout_accuracy()
+    reverted = False
+    if result.get("ok") and before is not None and after is not None and after < before - 0.01:
+        bucket = (result.get("layer") or {}).get("bucket")
+        if bucket is not None:
+            with layers.lock:
+                layers.models.pop(bucket, None)
+                meta = layers.meta.get(bucket, {})
+                meta["rejected"] = True
+                meta["fossil"] = True
+                meta["fossil_reason"] = "残差层留出集变差，自动回滚"
+                layers.meta[bucket] = meta
+            try:
+                layers._save_layer(bucket, meta)
+            except Exception:  # noqa: BLE001
+                pass
+        reverted = True
+        after = holdout_accuracy()
+    log_event("residual-layer", {"ok": result.get("ok"), "before": before,
+                                 "after": after, "wrong": result.get("wrong"),
+                                 "reverted": reverted, "auto": True})
+    return {**result, "holdout_before": before, "holdout_after": after,
+            "reverted": reverted, "delta": round((after or 0) - (before or 0), 3),
+            "note": "留出集不参与训练；变差自动回滚"}
+
+
+def auto_training_state():
+    try:
+        with open(TRAINING_AUTO, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_auto_training(state):
+    try:
+        with open(TRAINING_AUTO, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def auto_train_cycle():
+    """自动训练：观察期外，知识层新样本≥8、残差层新轨迹≥80 时触发。"""
+    if observation_active():
+        return {"ok": False, "reason": "观察期冻结", "frozen": True}
+    state = auto_training_state()
+    now = time.time()
+    actions = []
+    # 知识置信层
+    try:
+        import knowledge
+        records = [item for item in knowledge.load_records() if item.get("cosine") is not None]
+        status = knowledge.status()
+        trained_samples = int(status.get("samples") or 0) if status.get("trained") else 0
+        if len(records) - trained_samples >= 8:
+            result = knowledge.train()
+            if result.get("ok"):
+                state["last_knowledge_ts"] = now
+                actions.append({"knowledge": {k: result.get(k) for k in ("ok", "samples", "accuracy")}})
+    except Exception as error:  # noqa: BLE001
+        log_event("auto-train-knowledge-error", str(error)[:120])
+    # 残差层
+    try:
+        last_residual = float(state.get("last_residual_ts") or 0)
+        conn = sqlite3.connect(str(DATA / "trajectory.db"), timeout=5)
+        new_rows = conn.execute(
+            "SELECT COUNT(*) FROM trajectories WHERE ts > ? AND next_expression IS NOT NULL AND next_expression != ''",
+            (last_residual,)).fetchone()[0]
+        conn.close()
+        if new_rows >= 80:
+            result = train_residual_layer_guarded()
+            if result.get("ok"):
+                state["last_residual_ts"] = now
+                actions.append({"residual": {k: result.get(k) for k in
+                                             ("ok", "holdout_before", "holdout_after", "delta", "reverted")}})
+    except Exception as error:  # noqa: BLE001
+        log_event("auto-train-residual-error", str(error)[:120])
+    state["last_cycle"] = now
+    save_auto_training(state)
+    return {"ok": True, "actions": actions, "state": state}
 CURIOSITY = DATA / "curiosity.jsonl"
 PREDICTIONS = DATA / "predictions.jsonl"
 CORRECTIONS = DATA / "corrections.jsonl"
@@ -5590,6 +5689,10 @@ class Handler(BaseHTTPRequestHandler):
             person["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             save_social(state)
             return self._send(200, {"ok": True, "person": name, "state": person})
+        if path == "/api/training/auto":
+            return self._send(200, {"state": auto_training_state(),
+                                    "observation": observation_active(),
+                                    "result": auto_train_cycle()})
         if path == "/api/layers/train-residual":
             if observation_active():
                 return self._send(200, {"ok": False, "frozen": True,
@@ -6514,6 +6617,11 @@ def background_loop():
                 system_digest()
             except Exception as error:  # noqa: BLE001
                 log_event("system-digest-error", str(error)[:120])
+            try:
+                if not observation_active():
+                    auto_train_cycle()
+            except Exception as error:  # noqa: BLE001
+                log_event("auto-train-error", str(error)[:120])
             try:
                 if not observation_active():
                     maybe_auto_observation()
